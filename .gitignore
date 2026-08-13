@@ -1,0 +1,14 @@
+# データベース本体（実験記録の実データ。共有しない）
+data/
+*.db
+*.db-journal
+*.db-wal
+
+node_modules/
+
+# OS / エディタ
+Thumbs.db
+desktop.ini
+.DS_Store
+.vscode/
+.idea/
