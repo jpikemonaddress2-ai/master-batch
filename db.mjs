@@ -4,6 +4,7 @@ import { dirname } from 'node:path';
 import { DB_PATH, BARREL_ZONES } from './config.mjs';
 import { calcCharge, targetWeighings } from './public/calc.mjs';
 import { COND_FIELDS, JUDGEMENTS } from './public/fields.mjs';
+import { toCsv } from './public/matrix.mjs';
 
 export class HttpError extends Error {
   constructor(status, message) { super(message); this.status = status; }
@@ -235,7 +236,10 @@ function weighingsOf(sampleId) {
 }
 
 export function getSample(id) {
-  const s = db.prepare('SELECT * FROM samples WHERE id = ?').get(id);
+  const s = db.prepare(`
+    SELECT s.*, r.code AS recipe_code, r.name AS recipe_name
+    FROM samples s JOIN recipes r ON r.id = s.recipe_id WHERE s.id = ?
+  `).get(id);
   if (!s) throw new HttpError(404, 'サンプルが見つかりません');
   const { barrel_temps_json, ...rest } = s;
   return {
@@ -246,12 +250,40 @@ export function getSample(id) {
   };
 }
 
-export function listSamples() {
+/**
+ * サンプル一覧。条件はすべて省略可。
+ * @param {{recipe?:string, from?:string, to?:string, judgement?:string, q?:string}} f
+ *   judgement: 'good' | 'ok' | 'ng' | 'none'（未評価）
+ *   q: サンプル番号・所見・メモ・記入者・自由項目（項目名と値）の部分一致
+ */
+export function listSamples(f = {}) {
+  const like = f.q ? `%${f.q.replace(/[\\%_]/g, c => '\\' + c)}%` : null;
   return db.prepare(`
-    SELECT s.id, s.code, s.made_on, s.judgement, s.created_by, r.code AS recipe_code, r.name AS recipe_name
+    SELECT s.id, s.code, s.made_on, s.total_qty_g, s.screw_rpm, s.die_temp_c, s.torque_pct,
+      s.judgement, s.appearance_note, s.created_by,
+      r.id AS recipe_id, r.code AS recipe_code, r.name AS recipe_name
     FROM samples s JOIN recipes r ON r.id = s.recipe_id
+    WHERE (:recipe IS NULL OR s.recipe_id = :recipe)
+      AND (:from IS NULL OR s.made_on >= :from)
+      AND (:to IS NULL OR s.made_on <= :to)
+      AND (:judgement IS NULL OR (:judgement = 'none' AND s.judgement IS NULL) OR s.judgement = :judgement)
+      AND (:like IS NULL OR s.code LIKE :like ESCAPE '\\' OR s.appearance_note LIKE :like ESCAPE '\\'
+        OR s.memo LIKE :like ESCAPE '\\' OR s.created_by LIKE :like ESCAPE '\\'
+        OR EXISTS (SELECT 1 FROM sample_extras e WHERE e.sample_id = s.id
+          AND (e.label LIKE :like ESCAPE '\\' OR e.value LIKE :like ESCAPE '\\')))
     ORDER BY s.made_on DESC, s.id DESC
-  `).all();
+  `).all({
+    recipe: f.recipe ? Number(f.recipe) : null,
+    from: f.from || null,
+    to: f.to || null,
+    judgement: f.judgement || null,
+    like,
+  });
+}
+
+export function samplesCsv(f) {
+  const full = listSamples(f).reverse().map(s => getSample(s.id));
+  return toCsv(full, BARREL_ZONES);
 }
 
 // 自由項目で過去に使った項目名。入力候補に出して表記ゆれ（MFR / mfr など）を減らす

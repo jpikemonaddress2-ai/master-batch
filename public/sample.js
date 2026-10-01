@@ -89,6 +89,7 @@ async function reloadSamples() {
   [samples, extraLabels] = await Promise.all([api('GET', '/api/samples'), api('GET', '/api/extra-labels')]);
   drawSampleList();
   drawLabelLists();
+  document.dispatchEvent(new Event('samples-changed'));
 }
 
 function drawSampleList() {
@@ -104,15 +105,20 @@ function drawSampleList() {
       <span class="nm">${esc(s.recipe_code)} ${esc(s.recipe_name)}</span>
       <span class="meta">${esc(s.made_on ?? '')}${s.created_by ? ` / ${esc(s.created_by)}` : ''}</span>
     </div>`).join('');
-  box.querySelectorAll('.list-item').forEach(el => el.onclick = async () => {
-    const id = Number(el.dataset.id);
-    if (id === draft?.id || !confirmDiscard()) return;
-    try {
-      openDraft(fromSample(await api('GET', `/api/samples/${id}`)));
-    } catch (e) {
-      toast(e.message);
-    }
-  });
+  box.querySelectorAll('.list-item').forEach(el => el.onclick = () => openSample(Number(el.dataset.id)));
+}
+
+/** 保存済みサンプルを開く。破棄を断られた・読めなかったら false */
+export async function openSample(id) {
+  if (id === draft?.id) return true;
+  if (!confirmDiscard()) return false;
+  try {
+    openDraft(fromSample(await api('GET', `/api/samples/${id}`)));
+    return true;
+  } catch (e) {
+    toast(e.message);
+    return false;
+  }
 }
 
 function drawLabelLists() {

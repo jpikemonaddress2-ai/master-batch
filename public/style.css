@@ -148,3 +148,8 @@ dialog .actions{margin:0; padding:10px 14px; justify-content:flex-end}
   .summary{flex-wrap:wrap}
   .summary div{flex:1 1 45%}
 }
+a.btn{display:inline-block; text-decoration:none; font-family:inherit; font-size:12px; padding:6px 13px; border-radius:4px; border:1px solid var(--line-strong); background:#fff; color:var(--ink)}
+a.btn:hover{background:#f2f5f9}
+tr.clickable{cursor:pointer}
+.wrapper{overflow-x:auto}
+.cmp td{white-space:normal; min-width:110px}

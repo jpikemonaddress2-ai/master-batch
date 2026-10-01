@@ -15,8 +15,8 @@
 <nav>
   <button data-tab="recipe" class="on">配合</button>
   <button data-tab="sample">サンプル記録</button>
-  <button data-tab="list" disabled title="Step 3 で実装予定">サンプル一覧</button>
-  <button data-tab="compare" disabled title="Step 3 で実装予定">比較</button>
+  <button data-tab="list">サンプル一覧</button>
+  <button data-tab="compare">比較</button>
 </nav>
 
 <main>
@@ -158,6 +158,51 @@
   </div>
   <datalist id="dl-condition"></datalist>
   <datalist id="dl-measurement"></datalist>
+</section>
+
+<section id="tab-list" hidden>
+  <div class="panel">
+    <h2>サンプル一覧</h2>
+    <div class="filters">
+      <div class="field"><label for="fRecipe">配合</label><select class="w-lg" id="fRecipe"></select></div>
+      <div class="field"><label for="fFrom">作成日 From</label><input type="date" class="w-md" id="fFrom"></div>
+      <div class="field"><label for="fTo">To</label><input type="date" class="w-md" id="fTo"></div>
+      <div class="field"><label for="fJudge">判定</label><select class="w-sm" id="fJudge">
+        <option value="">すべて</option><option value="good">良</option><option value="ok">可</option>
+        <option value="ng">不可</option><option value="none">未評価</option>
+      </select></div>
+      <div class="field"><label for="fText">フリーテキスト</label><input class="w-lg" id="fText" placeholder="番号・所見・メモ・記入者・自由項目"></div>
+      <button class="btn" id="fClear">条件クリア</button>
+    </div>
+    <div class="bar">
+      <span class="count" id="lCount"></span>
+      <button class="btn" id="clearSel">選択を解除</button>
+      <button class="btn primary" id="goCompare">選択したサンプルを比較</button>
+      <a class="btn" id="csv" href="/api/samples.csv" download>表示中をCSVエクスポート</a>
+    </div>
+    <div class="wrapper">
+      <table>
+        <thead><tr>
+          <th style="width:34px"><input type="checkbox" id="chkAll" aria-label="表示中をすべて選択"></th>
+          <th>サンプル番号</th><th>作成日</th><th>配合</th>
+          <th class="num">総量 g</th><th class="num">回転数</th><th class="num">ダイ温度</th>
+          <th class="num">トルク</th><th>判定</th><th>外観・所見</th>
+        </tr></thead>
+        <tbody id="lRows"></tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+<section id="tab-compare" hidden>
+  <div class="panel cmp-panel">
+    <h2>比較</h2>
+    <div class="bar">
+      <label style="font-size:12px"><input type="checkbox" id="cOnlyDiff"> 差のある行だけ表示</label>
+    </div>
+    <div class="wrapper"><table class="cmp"><tbody id="cRows"></tbody></table></div>
+    <div class="legend"><span><span class="swatch"></span>値が揃っていない行（＝振った条件・出た差）</span></div>
+  </div>
 </section>
 
 </main>

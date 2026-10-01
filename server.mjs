@@ -38,7 +38,12 @@ async function readJson(req) {
   }
 }
 
-// [メソッド, パスの正規表現, 処理]。正規表現のキャプチャは params として渡す
+// [メソッド, パスの正規表現, 処理(req, params, query)]。正規表現のキャプチャを params、クエリ文字列を query として渡す。
+// 処理の戻り値は JSON で返す。Csv を返したときだけ CSV ファイルとしてダウンロードさせる
+class Csv { constructor(body, filename) { this.body = body; this.filename = filename; } }
+const filters = q => Object.fromEntries(['recipe', 'from', 'to', 'judgement', 'q'].map(k => [k, q.get(k) || null]));
+const stamp = () => new Date().toLocaleDateString('sv-SE').replaceAll('-', '');
+
 const routes = [
   ['GET', /^\/api\/config$/, () => ({ barrelZones: BARREL_ZONES })],
   ['GET', /^\/api\/materials$/, () => store.listMaterials()],
@@ -47,7 +52,8 @@ const routes = [
   ['GET', /^\/api\/recipes\/(\d+)$/, (req, [id]) => store.getRecipe(Number(id))],
   ['POST', /^\/api\/recipes$/, async req => store.saveRecipe(await readJson(req))],
   ['PUT', /^\/api\/recipes\/(\d+)$/, async (req, [id]) => store.saveRecipe(await readJson(req), Number(id))],
-  ['GET', /^\/api\/samples$/, () => store.listSamples()],
+  ['GET', /^\/api\/samples$/, (req, p, q) => store.listSamples(filters(q))],
+  ['GET', /^\/api\/samples\.csv$/, (req, p, q) => new Csv(store.samplesCsv(filters(q)), `samples_${stamp()}.csv`)],
   ['GET', /^\/api\/samples\/(\d+)$/, (req, [id]) => store.getSample(Number(id))],
   ['POST', /^\/api\/samples$/, async req => store.saveSample(await readJson(req))],
   ['PUT', /^\/api\/samples\/(\d+)$/, async (req, [id]) => store.saveSample(await readJson(req), Number(id))],
@@ -55,11 +61,20 @@ const routes = [
   ['GET', /^\/api\/extra-labels$/, () => store.listExtraLabels()],
 ];
 
-async function handleApi(req, res, path) {
+async function handleApi(req, res, url) {
   for (const [method, re, fn] of routes) {
-    const m = path.match(re);
+    const m = url.pathname.match(re);
     if (m && req.method === method) {
-      return send(res, 200, await fn(req, m.slice(1)));
+      const out = await fn(req, m.slice(1), url.searchParams);
+      if (out instanceof Csv) {
+        res.writeHead(200, {
+          'Content-Type': 'text/csv; charset=utf-8',
+          'Content-Disposition': `attachment; filename="${out.filename}"`,
+          'Cache-Control': 'no-store',
+        });
+        return res.end(out.body);
+      }
+      return send(res, 200, out);
     }
   }
   throw new HttpError(404, 'API が見つかりません');
@@ -81,10 +96,10 @@ async function serveStatic(req, res, path) {
 }
 
 const server = createServer(async (req, res) => {
-  const path = new URL(req.url, 'http://x').pathname;
+  const url = new URL(req.url, 'http://x');
   try {
-    if (path.startsWith('/api/')) await handleApi(req, res, path);
-    else await serveStatic(req, res, path);
+    if (url.pathname.startsWith('/api/')) await handleApi(req, res, url);
+    else await serveStatic(req, res, url.pathname);
   } catch (e) {
     if (e instanceof HttpError) return send(res, e.status, { error: e.message });
     console.error(e);

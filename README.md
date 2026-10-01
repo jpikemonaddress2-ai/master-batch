@@ -18,4 +18,13 @@
 
 ## 状態
 
-Step 1（原料マスタ・配合登録と仕込み量計算）まで実装済み。実装方針は [PLAN.md](PLAN.md) を参照。
+MVP（PLAN.md の Step 1〜3）を実装済み。実装方針は [PLAN.md](PLAN.md) を参照。
+
+| ファイル | 役割 |
+|---|---|
+| `server.mjs` | HTTP サーバー（静的配信と `/api/*`） |
+| `db.mjs` | スキーマとクエリ、入力の検証 |
+| `public/calc.mjs` | 仕込み量・実濃度の計算（画面とサーバーで共用） |
+| `public/fields.mjs` | 造粒条件の固定項目の定義（画面とサーバーで共用） |
+| `public/matrix.mjs` | 比較表と CSV の展開（画面とサーバーで共用） |
+| `public/*.js` | 各タブの画面（recipe / sample / list / compare） |
