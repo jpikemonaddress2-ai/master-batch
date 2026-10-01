@@ -1,6 +1,7 @@
-// サンプルを「項目 × サンプル」の表に展開する。比較表（画面）と CSV（サーバー）で共用する。
+// サンプルを「項目 × サンプル」の表に展開する。比較表・変更履歴の差分（画面）と CSV（サーバー）で共用する。
 import { calcActual } from './calc.mjs';
 import { COND_FIELDS, JUDGEMENTS } from './fields.mjs';
+import { fmtG, fmtRaw } from './format.mjs';
 
 // 表に出すグループの順番。csv はCSVの見出しに付ける接頭辞（自由項目の名前の衝突よけ）
 export const GROUPS = [
@@ -10,17 +11,18 @@ export const GROUPS = [
   { id: 'condExtra',   label: '造粒条件（自由項目）', csv: '条件:' },
   { id: 'eval',        label: '評価' },
   { id: 'measurement', label: '測定値', csv: '測定:' },
+  { id: 'record',      label: '記録' },
 ];
 
 const s2 = v => (v === null || v === undefined) ? '' : String(v);
-const fixed = (n, d) => Number.isFinite(n) ? n.toFixed(d) : '';
 
 /**
  * 1サンプルを項目の並びにする。
  * @param {object} s GET /api/samples/:id の形（recipe_code, weighings, extras, barrel_temps を含む）
  * @param {number} zones バレル温度のゾーン数
- * @returns {{group:string, key:string, label:string, unit:string, value:string, noDiff?:boolean}[]}
- *   noDiff: 値が違って当然の項目（サンプル番号など）。比較表で差分扱いしない
+ * @returns {{group:string, key:string, label:string, unit:string, value:string, noDiff?:boolean, stamp?:boolean}[]}
+ *   noDiff: 値が違って当然の項目（サンプル番号など）。比較表では差分扱いしない（変更履歴の差分では扱う）
+ *   stamp: 記録日時。保存のたびに変わるので、変更履歴の差分でも扱わない
  */
 export function sampleEntries(s, zones) {
   const out = [];
@@ -31,34 +33,37 @@ export function sampleEntries(s, zones) {
   add('basic', 'made_on', '作成日', '', s.made_on, { noDiff: true });
   add('basic', 'recipe', '配合', '', s.recipe_code);
   add('basic', 'recipe_name', '配合名', '', s.recipe_name);
-  add('basic', 'total_qty_g', '作成量', 'g', s.total_qty_g);
+  add('basic', 'total_qty_g', '作成量', 'g', fmtRaw(s.total_qty_g));
   add('basic', 'created_by', '記入者', '', s.created_by, { noDiff: true });
 
-  // 実秤量が1つも入っていなければ実濃度は出さない（狙い値の写しになって紛らわしいため）
-  const entered = s.weighings.some(w => Number.isFinite(w.actual_g));
+  // 実秤量が1つも入っていなければ実濃度は出さない（狙い値の写しになって紛らわしいため）。
+  // 一部の行だけ入っているときは、未入力の行を狙い量で補った推定値なので（推定）と付ける
   const act = calcActual(s.weighings);
+  const real = w => !act.entered ? '' : `${Number.isFinite(w.real_pct) ? w.real_pct.toFixed(3) : ''}${w.estimated ? '（推定）' : ''}`;
   for (const w of act.rows) {
     if (w.row_type === 'base') {
       add('weigh', 'base', 'ベース樹脂', '', w.material_name);
       add('weigh', 'base:lot', 'ベース樹脂 ロット', '', w.lot);
-      add('weigh', 'base:actual', 'ベース樹脂 実秤量', 'g', fixed(w.actual_g, 2));
+      add('weigh', 'base:target', 'ベース樹脂 狙い量', 'g', fmtG(w.target_g));
+      add('weigh', 'base:actual', 'ベース樹脂 実秤量', 'g', fmtRaw(w.actual_g));
       continue;
     }
     const k = `add:${w.material_id}`;
     const n = w.material_name;
-    add('weigh', `${k}:target`, `${n} 狙い濃度`, 'wt%', w.target_active_pct);
-    add('weigh', `${k}:active`, `${n} 有効成分`, '%', w.active_pct_snapshot);
+    add('weigh', `${k}:target`, `${n} 狙い濃度`, 'wt%', fmtRaw(w.target_active_pct));
+    add('weigh', `${k}:active`, `${n} 有効成分`, 'wt%', fmtRaw(w.active_pct_snapshot));
     add('weigh', `${k}:lot`, `${n} ロット`, '', w.lot);
-    add('weigh', `${k}:actual`, `${n} 実秤量`, 'g', fixed(w.actual_g, 2));
-    add('weigh', `${k}:real`, `${n} 実濃度`, 'wt%', entered ? fixed(w.real_pct, 3) : '');
+    add('weigh', `${k}:target_g`, `${n} 狙い量`, 'g', fmtG(w.target_g));
+    add('weigh', `${k}:actual`, `${n} 実秤量`, 'g', fmtRaw(w.actual_g));
+    add('weigh', `${k}:real`, `${n} 実濃度`, 'wt%', real(w));
   }
 
   const temps = s.barrel_temps ?? [];
   for (let i = 0; i < Math.max(zones, temps.length); i++) {
-    add('cond', `barrel:${i}`, `バレル温度 C${i + 1}`, '℃', temps[i]);
+    add('cond', `barrel:${i}`, `バレル温度（設定） C${i + 1}`, '℃', fmtRaw(temps[i]));
   }
-  add('cond', 'die_temp_c', 'ダイ温度', '℃', s.die_temp_c);
-  for (const f of COND_FIELDS) add('cond', f.key, f.label, f.unit, s[f.key]);
+  add('cond', 'die_temp_c', 'ダイ温度（設定）', '℃', fmtRaw(s.die_temp_c));
+  for (const f of COND_FIELDS) add('cond', f.key, f.label, f.unit, fmtRaw(s[f.key]));
 
   // 同じ項目名が複数ある（測定値の n=2 など）ときは 2つ目以降を「MFR (2)」として別の行にする
   const addExtras = (category, group, prefix) => {
@@ -77,6 +82,9 @@ export function sampleEntries(s, zones) {
   add('eval', 'memo', 'メモ', '', s.memo);
 
   addExtras('measurement', 'measurement', 'meas');
+
+  add('record', 'created_at', '記録日時', '', s.created_at, { noDiff: true, stamp: true });
+  add('record', 'updated_at', '最終更新', '', s.updated_at, { noDiff: true, stamp: true });
   return out;
 }
 
@@ -105,8 +113,9 @@ export function buildMatrix(samples, zones, { allDiff = false } = {}) {
       const shared = units.size <= 1;
       const unit = shared ? ([...units][0] ?? meta.get(key).unit) : '';
       const cells = es.map(e => (!e || e.value === '') ? '' : (shared || !e.unit ? e.value : `${e.value} ${e.unit}`));
-      const diff = (allDiff || !meta.get(key).noDiff) && new Set(cells).size > 1;
-      rows.push({ group: g.id, key, label: meta.get(key).label, unit, cells, diff });
+      const m = meta.get(key);
+      const counts = allDiff ? !m.stamp : !m.noDiff;
+      rows.push({ group: g.id, key, label: m.label, unit, cells, diff: counts && new Set(cells).size > 1 });
     }
   }
   return rows;
@@ -114,8 +123,8 @@ export function buildMatrix(samples, zones, { allDiff = false } = {}) {
 
 const csvCell = v => {
   let s = s2(v);
-  // 表計算ソフトで数式として実行されないようにする（負の数などの数値はそのまま）
-  if (/^[=+\-@\t\r]/.test(s) && !Number.isFinite(Number(s))) s = `'${s}`;
+  // 表計算ソフトで数式として実行されないようにする（負の数などの数値はそのまま）。全角の記号も対象にする
+  if (/^[=+\-@\t\r＝＋－＠]/.test(s) && !Number.isFinite(Number(s))) s = `'${s}`;
   return `"${s.replace(/"/g, '""')}"`;
 };
 

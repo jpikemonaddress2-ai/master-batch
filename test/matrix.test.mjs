@@ -31,6 +31,21 @@ test('allDiff: 変更履歴の差分ではサンプル番号・作成日の書�
   assert.deepEqual(rows.filter(r => r.diff).map(r => r.key), ['code', 'made_on']);
 });
 
+test('変更履歴の差分でも、保存のたびに変わる記録日時は差分にしない', () => {
+  const rows = buildMatrix([sample({ updated_at: '2026-10-01 10:00' }), sample({ updated_at: '2026-10-01 11:00' })], 2, { allDiff: true });
+  assert.deepEqual(rows.filter(r => r.diff), []);
+});
+
+test('狙い量と、一部だけ実秤量を入れたときの推定の印', () => {
+  const s = sample({ weighings: [
+    { row_type: 'additive', material_id: 2, material_name: 'AO', target_active_pct: 0.02, active_pct_snapshot: 50, target_g: 0.4, actual_g: null },
+    { row_type: 'base', material_id: 1, material_name: 'PP', target_g: 999.6, actual_g: 999.6 },
+  ] });
+  const rows = buildMatrix([s], 2);
+  assert.equal(rows.find(r => r.key === 'add:2:target_g').cells[0], '0.400');
+  assert.match(rows.find(r => r.key === 'add:2:real').cells[0], /（推定）$/);
+});
+
 test('同じ項目名の自由項目（n=2）は別の行として残す', () => {
   const s = sample({ extras: [
     { category: 'measurement', label: 'MFR', value: '1', unit: 'g/10min' },

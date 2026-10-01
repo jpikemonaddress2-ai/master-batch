@@ -2,8 +2,8 @@ import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { DB_PATH, BARREL_ZONES } from './config.mjs';
-import { calcCharge, targetWeighings } from './public/calc.mjs';
-import { COND_FIELDS, JUDGEMENTS } from './public/fields.mjs';
+import { calcCharge, targetWeighings, compositionSig, basisFromWeighings } from './public/calc.mjs';
+import { COND_FIELDS, JUDGEMENTS, MAX_ZONES, MAX_EXTRAS, MAX_ITEMS } from './public/fields.mjs';
 import { toCsv } from './public/matrix.mjs';
 
 export class HttpError extends Error {
@@ -178,6 +178,21 @@ DELETE FROM sqlite_sequence WHERE name IN ('samples', 'samples_new');
 INSERT INTO sqlite_sequence (name, seq) VALUES ('samples',
   MAX((SELECT IFNULL(MAX(id), 0) FROM samples), (SELECT IFNULL(MAX(sample_id), 0) FROM sample_history)));
 `,
+  // 4: 樹脂温度（実測）、原料の取扱注意、配合の変更履歴
+  `
+ALTER TABLE samples ADD COLUMN resin_temp_c REAL;
+ALTER TABLE materials ADD COLUMN caution TEXT;
+
+-- 配合の更新の直前の内容を JSON で残す
+CREATE TABLE recipe_history (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  recipe_id     INTEGER NOT NULL,
+  changed_by    TEXT NOT NULL,
+  changed_at    TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+  snapshot_json TEXT NOT NULL
+);
+CREATE INDEX idx_recipe_history ON recipe_history(recipe_id);
+`,
 ];
 
 {
@@ -214,51 +229,109 @@ export function closeDb() {
 
 const str = v => (v ?? '').toString().trim();
 const num = v => (v === '' || v === null || v === undefined) ? NaN : Number(v);
+const list = (v, max, label) => {
+  const a = Array.isArray(v) ? v : [];
+  if (a.length > max) throw new HttpError(400, `${label}は ${max} 行までです`);
+  return a;
+};
+
+// 読み取りを1つのスナップショットで行う（途中で他の人が書き換えても食い違わないように）
+function readTx(fn) {
+  db.exec('BEGIN');
+  try {
+    return fn();
+  } finally {
+    if (db.isTransaction) db.exec('COMMIT');
+  }
+}
 
 // ---------- 原料マスタ ----------
 
+// 表記ゆれの判定用。全角/半角・大文字/小文字・空白の違いを無視する（「Irganox 1010」と「ＩＲＧＡＮＯＸ１０１０」は同じ）
+const normName = s => s.normalize('NFKC').toLowerCase().replace(/\s+/g, '');
+
+const MATERIAL_SELECT = `
+  SELECT m.*,
+    (SELECT COUNT(*) FROM recipes r WHERE r.base_material_id = m.id)
+    + (SELECT COUNT(*) FROM recipe_items ri WHERE ri.material_id = m.id)
+    + (SELECT COUNT(*) FROM sample_weighings w WHERE w.material_id = m.id) AS used_count
+  FROM materials m`;
+
 export function listMaterials() {
-  return db.prepare('SELECT * FROM materials ORDER BY kind DESC, name').all();
+  return db.prepare(`${MATERIAL_SELECT} ORDER BY m.kind DESC, m.name`).all();
 }
 
-export function createMaterial(input) {
+function getMaterial(id) {
+  const m = db.prepare(`${MATERIAL_SELECT} WHERE m.id = ?`).get(id);
+  if (!m) throw new HttpError(404, '原料が見つかりません');
+  return m;
+}
+
+function validateMaterial(input, selfId = null) {
   const name = str(input.name);
   const kind = input.kind;
   const active = num(input.active_pct);
   if (!name) throw new HttpError(400, '原料名を入力してください');
   if (kind !== 'resin' && kind !== 'additive') throw new HttpError(400, '種別が不正です');
   if (!(active > 0 && active <= 100)) throw new HttpError(400, '有効成分 % は 0 より大きく 100 以下で入力してください');
-  if (db.prepare('SELECT 1 FROM materials WHERE name = ?').get(name)) {
-    throw new HttpError(409, `原料「${name}」は既に登録されています`);
+  const same = db.prepare('SELECT id, name FROM materials').all()
+    .find(m => m.id !== selfId && normName(m.name) === normName(name));
+  if (same) {
+    throw new HttpError(409, same.name === name
+      ? `原料「${name}」は既に登録されています`
+      : `原料「${same.name}」が既に登録されています（全角/半角・大文字/小文字・空白の違いだけの名前は登録できません）`);
   }
+  return {
+    name, kind, active_pct: active,
+    supplier: str(input.supplier) || null, memo: str(input.memo) || null, caution: str(input.caution) || null,
+  };
+}
+
+export function createMaterial(input) {
+  const v = validateMaterial(input);
   const { lastInsertRowid } = db.prepare(
-    'INSERT INTO materials (name, kind, active_pct, supplier, memo) VALUES (?, ?, ?, ?, ?)'
-  ).run(name, kind, active, str(input.supplier) || null, str(input.memo) || null);
-  return db.prepare('SELECT * FROM materials WHERE id = ?').get(lastInsertRowid);
+    'INSERT INTO materials (name, kind, active_pct, supplier, memo, caution) VALUES (?, ?, ?, ?, ?, ?)'
+  ).run(v.name, v.kind, v.active_pct, v.supplier, v.memo, v.caution);
+  return getMaterial(Number(lastInsertRowid));
+}
+
+/**
+ * 原料を直す。配合やサンプルで使われている原料は、名前・種別・有効成分% を変えられない
+ * （変えると過去の記録の意味が変わる）。間違えて登録したなら「使用停止」にして新しく登録してもらう。
+ * メーカー・メモ・取扱注意・使用停止はいつでも変えられる。
+ */
+export function updateMaterial(id, input) {
+  return tx(() => {
+    const cur = getMaterial(id);
+    const v = validateMaterial(input, id);
+    if (cur.used_count > 0 && (v.name !== cur.name || v.kind !== cur.kind || v.active_pct !== cur.active_pct)) {
+      throw new HttpError(409, 'この原料は配合やサンプルで使われているため、名前・種別・有効成分 % は変更できません。「使用停止」にして、正しい内容で新しく登録してください');
+    }
+    db.prepare(`
+      UPDATE materials SET name = ?, kind = ?, active_pct = ?, supplier = ?, memo = ?, caution = ?, archived = ?
+      WHERE id = ?
+    `).run(v.name, v.kind, v.active_pct, v.supplier, v.memo, v.caution, input.archived ? 1 : 0, id);
+    return getMaterial(id);
+  });
 }
 
 // ---------- 配合 ----------
 
-function itemsOf(recipeId) {
-  return db.prepare(`
-    SELECT ri.material_id, ri.target_active_pct, m.name AS material_name, m.active_pct
-    FROM recipe_items ri JOIN materials m ON m.id = ri.material_id
-    WHERE ri.recipe_id = ? ORDER BY ri.id
-  `).all(recipeId);
-}
-
 const RECIPE_SELECT = `
   SELECT r.*, (SELECT COUNT(*) FROM samples s WHERE s.recipe_id = r.id) AS sample_count FROM recipes r`;
+const ITEM_SELECT = `
+  SELECT ri.recipe_id, ri.material_id, ri.target_active_pct, m.name AS material_name, m.active_pct, m.archived
+  FROM recipe_items ri JOIN materials m ON m.id = ri.material_id`;
 
 export function getRecipe(id) {
   const r = db.prepare(`${RECIPE_SELECT} WHERE r.id = ?`).get(id);
   if (!r) throw new HttpError(404, '配合が見つかりません');
-  return { ...r, items: itemsOf(id) };
+  return { ...r, items: db.prepare(`${ITEM_SELECT} WHERE ri.recipe_id = ? ORDER BY ri.id`).all(id) };
 }
 
 export function listRecipes() {
-  return db.prepare(`${RECIPE_SELECT} ORDER BY r.code`).all()
-    .map(r => ({ ...r, items: itemsOf(r.id) }));
+  const items = Map.groupBy(db.prepare(`${ITEM_SELECT} ORDER BY ri.id`).all(), i => i.recipe_id);
+  return db.prepare(`${RECIPE_SELECT} ORDER BY r.code`).all().map(r => ({ ...r, items: items.get(r.id) ?? [] }));
 }
 
 function validateRecipe(input) {
@@ -272,7 +345,7 @@ function validateRecipe(input) {
   const base = db.prepare('SELECT * FROM materials WHERE id = ?').get(Number(input.base_material_id));
   if (!base || base.kind !== 'resin') throw new HttpError(400, 'ベース樹脂を選択してください');
 
-  const items = (Array.isArray(input.items) ? input.items : []).map((it, i) => {
+  const items = list(input.items, MAX_ITEMS, '添加剤').map((it, i) => {
     const m = db.prepare('SELECT * FROM materials WHERE id = ?').get(Number(it.material_id));
     if (!m || m.kind !== 'additive') throw new HttpError(400, `添加剤 ${i + 1} 行目: 原料を選択してください`);
     const pct = num(it.target_active_pct);
@@ -292,6 +365,8 @@ function validateRecipe(input) {
 
 export function saveRecipe(input, id = null) {
   const v = validateRecipe(input);
+  const changedBy = str(input.changed_by);
+  if (id !== null && !changedBy) throw new HttpError(400, '変更者の名前を入力してください');
   return tx(() => {
     const clash = db.prepare('SELECT id FROM recipes WHERE code = ? AND id IS NOT ?').get(v.code, id);
     if (clash) throw new HttpError(409, `配合コード「${v.code}」は既に使われています`);
@@ -305,13 +380,14 @@ export function saveRecipe(input, id = null) {
       if (cur.version !== Number(input.version)) {
         throw new HttpError(409, '他の人がこの配合を先に保存しました。最新の内容を読み直してください', 'stale');
       }
-      // サンプルが付いた配合の組成を変えると、同じ配合コードの下に組成の違うサンプルが混ざる。
-      // 組成（ベース樹脂・添加剤・狙い濃度）の変更は禁止し、複製で新しい配合を作ってもらう
-      const sig = (base, items) => JSON.stringify([base, items.map(i => [i.material_id, i.target_active_pct])
-        .sort((a, b) => a[0] - b[0])]);
-      if (cur.sample_count > 0 && sig(cur.base_material_id, cur.items) !== sig(v.base_material_id, v.items)) {
-        throw new HttpError(409, `この配合にはサンプルが ${cur.sample_count} 件あるため、組成は変更できません。「複製」で新しい配合を作ってください`, 'locked');
+      // サンプルが付いた配合の組成やコードを変えると、同じ配合コードの下に組成の違うサンプルが混ざったり、
+      // ノートに書いたコードが別の配合を指したりする。変えたいときは複製で新しい配合を作ってもらう
+      if (cur.sample_count > 0 &&
+          (compositionSig(cur.base_material_id, cur.items) !== compositionSig(v.base_material_id, v.items) || cur.code !== v.code)) {
+        throw new HttpError(409, `この配合にはサンプルが ${cur.sample_count} 件あるため、配合コードと組成は変更できません。「複製」で新しい配合を作ってください`, 'locked');
       }
+      db.prepare('INSERT INTO recipe_history (recipe_id, changed_by, snapshot_json) VALUES (?, ?, ?)')
+        .run(id, changedBy, JSON.stringify(cur));
       db.prepare(`
         UPDATE recipes SET code = ?, name = ?, base_material_id = ?, default_qty_g = ?, memo = ?,
           version = version + 1, updated_at = datetime('now', 'localtime')
@@ -323,6 +399,11 @@ export function saveRecipe(input, id = null) {
     for (const it of v.items) ins.run(id, it.material_id, it.target_active_pct);
     return getRecipe(id);
   });
+}
+
+export function listRecipeHistory(recipeId) {
+  return db.prepare('SELECT * FROM recipe_history WHERE recipe_id = ? ORDER BY id DESC').all(recipeId)
+    .map(({ snapshot_json, ...h }) => ({ ...h, snapshot: JSON.parse(snapshot_json) }));
 }
 
 // ---------- サンプル ----------
@@ -337,7 +418,7 @@ function optNum(v, label) {
 
 function weighingsOf(sampleId) {
   return db.prepare(`
-    SELECT w.*, m.name AS material_name
+    SELECT w.*, m.name AS material_name, m.caution
     FROM sample_weighings w JOIN materials m ON m.id = w.material_id
     WHERE w.sample_id = ? ORDER BY w.id
   `).all(sampleId);
@@ -359,13 +440,15 @@ export function getSample(id) {
 }
 
 /**
- * サンプル一覧。条件はすべて省略可。
+ * サンプル一覧。条件はすべて省略可。新しい作成日の順（asc: true なら古い順）。
  * @param {{recipe?:string, from?:string, to?:string, judgement?:string, q?:string}} f
  *   judgement: 'good' | 'ok' | 'ng' | 'none'（未評価）
  *   q: サンプル番号・所見・メモ・記入者・自由項目（項目名と値）の部分一致
+ * @param {{limit?:number|null, asc?:boolean}} [opts]
  */
-export function listSamples(f = {}) {
+export function listSamples(f = {}, { limit = null, asc = false } = {}) {
   const like = f.q ? `%${f.q.replace(/[\\%_]/g, c => '\\' + c)}%` : null;
+  const dir = asc ? 'ASC' : 'DESC';
   return db.prepare(`
     SELECT s.id, s.code, s.made_on, s.total_qty_g, s.screw_rpm, s.die_temp_c, s.torque_pct,
       s.judgement, s.appearance_note, s.created_by,
@@ -379,19 +462,24 @@ export function listSamples(f = {}) {
         OR s.memo LIKE :like ESCAPE '\\' OR s.created_by LIKE :like ESCAPE '\\'
         OR EXISTS (SELECT 1 FROM sample_extras e WHERE e.sample_id = s.id
           AND (e.label LIKE :like ESCAPE '\\' OR e.value LIKE :like ESCAPE '\\')))
-    ORDER BY s.made_on DESC, s.id DESC
+    ORDER BY s.made_on ${dir}, s.id ${dir}
+    LIMIT :limit
   `).all({
     recipe: f.recipe ? Number(f.recipe) : null,
     from: f.from || null,
     to: f.to || null,
     judgement: f.judgement || null,
     like,
+    limit: limit > 0 ? limit : -1,
   });
 }
 
+export function countSamples() {
+  return db.prepare('SELECT COUNT(*) AS n FROM samples').get().n;
+}
+
 export function samplesCsv(f) {
-  const full = listSamples(f).reverse().map(s => getSample(s.id));
-  return toCsv(full, BARREL_ZONES);
+  return readTx(() => toCsv(listSamples(f, { asc: true }).map(s => getSample(s.id)), BARREL_ZONES));
 }
 
 // 自由項目で過去に使った項目名。入力候補に出して表記ゆれ（MFR / mfr など）を減らす
@@ -408,11 +496,14 @@ function validateSample(input) {
   const createdBy = str(input.created_by);
   const qty = num(input.total_qty_g);
   if (!(qty > 0)) throw new HttpError(400, '作成量は 0 より大きい値を入力してください');
-  const madeOn = str(input.made_on) || null;
-  if (madeOn && !/^\d{4}-\d{2}-\d{2}$/.test(madeOn)) throw new HttpError(400, '作成日の形式が不正です');
+  const madeOn = str(input.made_on);
+  if (!madeOn) throw new HttpError(400, '作成日を入力してください');
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(madeOn)) throw new HttpError(400, '作成日の形式が不正です');
 
-  const temps = Array.isArray(input.barrel_temps) ? input.barrel_temps : [];
-  const barrel = Array.from({ length: BARREL_ZONES }, (_, i) => optNum(temps[i], `バレル温度 C${i + 1}`));
+  // ゾーン数を減らした後でも、前に記録したゾーンの温度は切り捨てない
+  const temps = list(input.barrel_temps, MAX_ZONES, 'バレル温度');
+  const barrel = Array.from({ length: Math.max(BARREL_ZONES, temps.length) },
+    (_, i) => optNum(temps[i], `バレル温度 C${i + 1}`));
 
   const cond = {};
   for (const f of COND_FIELDS) cond[f.key] = optNum(input[f.key], f.label);
@@ -420,7 +511,7 @@ function validateSample(input) {
   const judgement = input.judgement || null;
   if (judgement !== null && !Object.hasOwn(JUDGEMENTS, judgement)) throw new HttpError(400, '総合判定が不正です');
 
-  const extras = (Array.isArray(input.extras) ? input.extras : []).map(e => {
+  const extras = list(input.extras, MAX_EXTRAS, '自由項目').map(e => {
     const label = str(e.label);
     if (e.category !== 'condition' && e.category !== 'measurement') throw new HttpError(400, '自由項目の区分が不正です');
     if (!label) throw new HttpError(400, '自由項目: 項目名が空の行があります');
@@ -454,35 +545,39 @@ export function saveSample(input, id = null) {
     const clash = db.prepare('SELECT id FROM samples WHERE code = ? AND id IS NOT ?').get(v.code, id);
     if (clash) throw new HttpError(409, `サンプル番号「${v.code}」は既に使われています`);
 
-    let recipeId, baseId, basis;
+    let recipeId, baseId, basis, prevCode = null;
     if (id === null) {
       const r = getRecipe(Number(input.recipe_id));
-      if (r.version !== Number(input.recipe_version)) {
-        throw new HttpError(409, 'この配合は画面を開いた後に他の人が変更しました。最新の配合で狙い量を取り直したので、確認してから保存し直してください', 'recipe_changed');
+      // 画面で見ていた組成と今の組成が違えば、狙い量を取り直してもらう（名前やメモの変更は関係ない）
+      if (compositionSig(r.base_material_id, r.items) !== input.recipe_sig) {
+        throw new HttpError(409, 'この配合の組成が、画面を開いた後に変更されました。最新の配合で狙い量を取り直したので、確認してから保存し直してください', 'recipe_changed');
       }
       recipeId = r.id;
       baseId = r.base_material_id;
       basis = r.items;
     } else {
-      const cur = db.prepare('SELECT recipe_id, version, created_by FROM samples WHERE id = ?').get(id);
+      const cur = db.prepare('SELECT recipe_id, version, created_by, code FROM samples WHERE id = ?').get(id);
       if (!cur) throw new HttpError(404, 'サンプルが見つかりません');
       if (cur.version !== Number(input.version)) {
         throw new HttpError(409, '他の人がこのサンプルを先に保存しました。最新の内容を読み直してください', 'stale');
       }
       recordHistory(id, 'update', changedBy);
       v.created_by = cur.created_by;
+      prevCode = cur.code;
       recipeId = cur.recipe_id;
-      const old = weighingsOf(id);
-      baseId = old.find(w => w.row_type === 'base').material_id;
-      basis = old.filter(w => w.row_type === 'additive').map(w => ({
-        material_id: w.material_id, target_active_pct: w.target_active_pct, active_pct: w.active_pct_snapshot,
-      }));
+      ({ base_material_id: baseId, items: basis } = basisFromWeighings(weighingsOf(id)));
+    }
+
+    // 削除したサンプルの番号を別のサンプルに使い回すと、ノートやラベルの記載と記録の対応が崩れる
+    if (v.code !== prevCode && db.prepare(`
+      SELECT 1 FROM sample_history WHERE op = 'delete' AND json_extract(snapshot_json, '$.code') = ?`).get(v.code)) {
+      throw new HttpError(409, `サンプル番号「${v.code}」は削除済みのサンプルで使われていました。別の番号にしてください`);
     }
 
     const tw = targetWeighings(v.total_qty_g, baseId, basis);
     if (tw.over) throw new HttpError(400, '配合過剰: 添加剤の合計が作成量を超えています');
 
-    const actuals = new Map((Array.isArray(input.actuals) ? input.actuals : [])
+    const actuals = new Map(list(input.actuals, MAX_ITEMS + 1, '秤量')
       .map(a => [`${a.row_type}:${a.material_id}`, a]));
     const rows = tw.rows.map(r => {
       const a = actuals.get(`${r.row_type}:${r.material_id}`) ?? {};
@@ -540,5 +635,11 @@ export function deleteSample(id, input) {
 
 export function listHistory(sampleId) {
   return db.prepare('SELECT * FROM sample_history WHERE sample_id = ? ORDER BY id DESC').all(sampleId)
+    .map(({ snapshot_json, ...h }) => ({ ...h, snapshot: JSON.parse(snapshot_json) }));
+}
+
+// 削除したサンプル（削除直前の内容付き）。新しく削除した順
+export function listDeletedSamples() {
+  return db.prepare(`SELECT * FROM sample_history WHERE op = 'delete' ORDER BY id DESC`).all()
     .map(({ snapshot_json, ...h }) => ({ ...h, snapshot: JSON.parse(snapshot_json) }));
 }

@@ -6,27 +6,31 @@
 <title>マスターバッチ 配合・造粒条件管理</title>
 <link rel="stylesheet" href="style.css">
 </head>
-<body>
+<body class="loading">
 
 <header>
   <h1>マスターバッチ 配合・造粒条件管理</h1>
+  <span class="env" id="loadingNote">読み込み中…</span>
 </header>
 
-<nav>
-  <button data-tab="recipe" class="on">配合</button>
-  <button data-tab="sample">サンプル記録</button>
-  <button data-tab="list">サンプル一覧</button>
-  <button data-tab="compare">比較</button>
+<nav role="tablist" aria-label="画面">
+  <button role="tab" data-tab="recipe" class="on" aria-selected="true" aria-controls="tab-recipe" disabled>配合</button>
+  <button role="tab" data-tab="sample" aria-selected="false" aria-controls="tab-sample" disabled>サンプル記録</button>
+  <button role="tab" data-tab="list" aria-selected="false" aria-controls="tab-list" disabled>サンプル一覧</button>
+  <button role="tab" data-tab="compare" aria-selected="false" aria-controls="tab-compare" disabled>比較</button>
 </nav>
 
 <main>
 
-<section id="tab-recipe">
+<section id="tab-recipe" role="tabpanel">
   <div class="cols">
     <div class="panel">
       <h2>配合一覧</h2>
       <div id="recipeList"></div>
-      <div style="padding:10px 14px"><button class="btn" id="newRecipe" style="width:100%">＋ 新規配合</button></div>
+      <div style="padding:10px 14px; display:flex; flex-direction:column; gap:6px">
+        <button class="btn" id="newRecipe" style="width:100%">＋ 新規配合</button>
+        <button class="btn" id="openMatList" style="width:100%">原料マスタ</button>
+      </div>
     </div>
 
     <div class="panel">
@@ -34,27 +38,29 @@
       <div class="body">
         <div id="rLockNote"></div>
         <div class="row">
-          <div class="field"><label for="rCode">配合コード</label><input class="w-md" id="rCode" placeholder="例: MB-001"></div>
-          <div class="field"><label for="rName">配合名</label><input class="w-xl" id="rName" placeholder="例: PP / 酸化防止剤 2%"></div>
+          <div class="field"><label for="rCode">配合コード <span class="req" aria-hidden="true">*</span></label><input class="w-md" id="rCode" placeholder="例: MB-001" required aria-required="true"></div>
+          <div class="field"><label for="rName">配合名 <span class="req" aria-hidden="true">*</span></label><input class="w-xl" id="rName" placeholder="例: PP / 酸化防止剤 2%" required aria-required="true"></div>
           <div class="field"><label for="rBase">ベース樹脂</label><select class="w-lg" id="rBase"></select></div>
         </div>
 
-        <div class="sub-h">添加剤（狙い濃度は「有効成分としての wt%」で入力）</div>
-        <table>
-          <thead><tr>
-            <th>原料</th><th class="num" style="width:110px">有効成分 %</th>
-            <th class="num" style="width:130px">狙い濃度 wt%</th>
-            <th class="num" style="width:130px">仕込み量 g</th><th style="width:50px"></th>
-          </tr></thead>
-          <tbody id="rItems"></tbody>
-        </table>
+        <div class="sub-h">添加剤（狙い濃度は「有効成分としての wt%」で入力）<span id="rItemsLock" class="lock-tag" hidden>組成はロック中（変えるときは複製）</span></div>
+        <div class="wrapper">
+          <table>
+            <thead><tr>
+              <th>原料</th><th class="num" style="width:110px">有効成分 wt%</th>
+              <th class="num" style="width:130px">狙い濃度 wt%</th>
+              <th class="num" style="width:130px">仕込み量 g</th><th style="width:50px"></th>
+            </tr></thead>
+            <tbody id="rItems"></tbody>
+          </table>
+        </div>
         <div style="margin-top:8px">
           <button class="link" id="addItem">＋ 添加剤を追加</button>
           <button class="link" id="addMat">＋ 原料マスタに登録</button>
         </div>
 
         <div class="row" style="margin-top:16px">
-          <div class="field"><label for="rQty">作成量 (g)</label><input type="number" class="w-md" id="rQty" step="1" min="0"></div>
+          <div class="field"><label for="rQty">作成量 (g) <span class="req" aria-hidden="true">*</span></label><input type="number" class="w-md" id="rQty" step="any" min="0" required aria-required="true"></div>
         </div>
 
         <div class="summary" id="rSummary"></div>
@@ -70,17 +76,19 @@
         </div>
 
         <div id="rSaveAlert"></div>
-        <div class="actions">
+        <div class="actions" style="align-items:flex-end">
+          <div class="field" id="rEditorField"><label for="rEditor">変更者（履歴に残ります）</label><input class="w-md" id="rEditor"></div>
           <button class="btn primary" id="save">保存</button>
           <button class="btn" id="toSample">この配合でサンプルを作る</button>
           <button class="btn" id="duplicate" style="margin-left:auto">複製</button>
         </div>
+        <div id="rHistory"></div>
       </div>
     </div>
   </div>
 </section>
 
-<section id="tab-sample" hidden>
+<section id="tab-sample" role="tabpanel" hidden>
   <div class="cols">
     <div class="panel">
       <h2>最近のサンプル</h2>
@@ -98,56 +106,60 @@
         </div>
         <div class="row">
           <div class="field"><label for="sRecipe">配合</label><select class="w-xl" id="sRecipe"></select></div>
-          <div class="field"><label for="sCode">サンプル番号</label><input class="w-md" id="sCode" placeholder="例: S-2026-001"></div>
-          <div class="field"><label for="sDate">作成日</label><input type="date" class="w-md" id="sDate"></div>
-          <div class="field"><label for="sQty">作成量 (g)</label><input type="number" class="w-sm" id="sQty" step="any" min="0"></div>
-          <div class="field"><label for="sBy">記入者</label><input class="w-md" id="sBy"></div>
+          <div class="field"><label for="sCode">サンプル番号 <span class="req" aria-hidden="true">*</span></label><input class="w-md" id="sCode" placeholder="例: S-2026-001" required aria-required="true"></div>
+          <div class="field"><label for="sDate">作成日 <span class="req" aria-hidden="true">*</span></label><input type="date" class="w-md" id="sDate" required aria-required="true"></div>
+          <div class="field"><label for="sQty">作成量 (g) <span class="req" aria-hidden="true">*</span></label><input type="number" class="w-sm" id="sQty" step="any" min="0" required aria-required="true"></div>
+          <div class="field"><label for="sBy">記入者 <span class="req" aria-hidden="true">*</span></label><input class="w-md" id="sBy" required aria-required="true"></div>
         </div>
 
         <div class="sub-h">秤量（狙い量に対して、実際に秤った値を入力。未入力の行は狙い量で計算）</div>
-        <table>
-          <thead><tr>
-            <th>原料</th><th class="num">狙い濃度 wt%</th><th class="num">有効成分 %</th>
-            <th class="num">狙い量 g</th><th style="width:130px">ロット</th><th class="num" style="width:120px">実秤量 g</th>
-            <th class="num">実濃度 wt%</th><th class="num">狙い比</th>
-          </tr></thead>
-          <tbody id="sWeigh"></tbody>
-        </table>
+        <div class="wrapper">
+          <table class="weigh">
+            <thead><tr>
+              <th>原料</th><th class="num">狙い濃度 wt%</th><th class="num">有効成分 wt%</th>
+              <th class="num">狙い量 g</th><th class="lot-col">ロット</th><th class="num" style="width:110px">実秤量 g</th>
+              <th class="num">実濃度 wt%</th><th class="num">狙い比</th>
+            </tr></thead>
+            <tbody id="sWeigh"></tbody>
+          </table>
+        </div>
         <div class="summary" id="sSummary"></div>
         <div id="sWeighAlert"></div>
 
-        <div class="sub-h">造粒条件 — バレル温度 (℃)</div>
+        <div class="sub-h">造粒条件 — バレル温度（設定値, ℃）</div>
         <div class="zones" id="sZones"></div>
 
         <div class="sub-h">造粒条件 — 運転</div>
         <div class="row" id="sCond"></div>
 
         <div class="sub-h">造粒条件 — 自由項目</div>
-        <table style="max-width:720px">
-          <thead><tr><th>項目名</th><th style="width:180px">値</th><th style="width:110px">単位</th><th style="width:50px"></th></tr></thead>
-          <tbody id="sExtras-condition"></tbody>
-        </table>
+        <div class="wrapper">
+          <table style="max-width:720px">
+            <thead><tr><th>項目名</th><th style="width:180px">値</th><th style="width:110px">単位</th><th style="width:50px"></th></tr></thead>
+            <tbody id="sExtras-condition"></tbody>
+          </table>
+        </div>
         <div style="margin-top:8px"><button class="link" id="addCond">＋ 項目を追加</button></div>
 
         <div class="sub-h">評価</div>
-        <div class="field">
-          <label>総合判定</label>
-          <div style="display:flex; gap:14px; padding-top:4px">
-            <label style="font-weight:400;color:var(--ink)"><input type="radio" name="sJudge" value="good"> 良</label>
-            <label style="font-weight:400;color:var(--ink)"><input type="radio" name="sJudge" value="ok"> 可</label>
-            <label style="font-weight:400;color:var(--ink)"><input type="radio" name="sJudge" value="ng"> 不可</label>
-            <label style="font-weight:400;color:var(--sub)"><input type="radio" name="sJudge" value=""> 未評価</label>
-          </div>
-        </div>
+        <fieldset class="judge">
+          <legend>総合判定</legend>
+          <label><input type="radio" name="sJudge" value="good"> 良</label>
+          <label><input type="radio" name="sJudge" value="ok"> 可</label>
+          <label><input type="radio" name="sJudge" value="ng"> 不可</label>
+          <label class="muted"><input type="radio" name="sJudge" value=""> 未評価</label>
+        </fieldset>
         <div class="field" style="margin-top:12px; max-width:720px">
           <label for="sNote">外観・所見</label><textarea id="sNote"></textarea>
         </div>
 
-        <div class="sub-h">測定値（自由項目）</div>
-        <table style="max-width:720px">
-          <thead><tr><th>項目名</th><th style="width:140px">値</th><th style="width:110px">単位</th><th style="width:50px"></th></tr></thead>
-          <tbody id="sExtras-measurement"></tbody>
-        </table>
+        <div class="sub-h">測定値（自由項目。値を入れなかった行は保存されません）</div>
+        <div class="wrapper">
+          <table style="max-width:720px">
+            <thead><tr><th>項目名</th><th style="width:140px">値</th><th style="width:110px">単位</th><th style="width:50px"></th></tr></thead>
+            <tbody id="sExtras-measurement"></tbody>
+          </table>
+        </div>
         <div style="margin-top:8px"><button class="link" id="addMeas">＋ 項目を追加</button></div>
 
         <div class="field" style="margin-top:14px; max-width:720px">
@@ -160,7 +172,7 @@
           <button class="btn primary" id="sSave">保存</button>
           <button class="btn" id="sSaveNext">保存して続けて新規</button>
           <button class="btn" id="sCopy">このサンプルを元に新規作成</button>
-          <button class="btn" id="sDelete" style="margin-left:auto">削除</button>
+          <button class="btn danger" id="sDelete" style="margin-left:auto">削除</button>
         </div>
         <div id="sHistory"></div>
       </div>
@@ -170,7 +182,7 @@
   <datalist id="dl-measurement"></datalist>
 </section>
 
-<section id="tab-list" hidden>
+<section id="tab-list" role="tabpanel" hidden>
   <div class="panel">
     <h2>サンプル一覧</h2>
     <div class="filters">
@@ -183,20 +195,22 @@
       </select></div>
       <div class="field"><label for="fText">フリーテキスト</label><input class="w-lg" id="fText" placeholder="番号・所見・メモ・記入者・自由項目"></div>
       <button class="btn" id="fClear">条件クリア</button>
+      <span class="warn" id="fRangeWarn" hidden>作成日の From が To より後になっています</span>
     </div>
     <div class="bar">
-      <span class="count" id="lCount"></span>
+      <span class="count" id="lCount" aria-live="polite"></span>
       <button class="btn" id="clearSel">選択を解除</button>
-      <button class="btn primary" id="goCompare">選択したサンプルを比較</button>
+      <button class="btn primary" id="goCompare" disabled>選択したサンプルを比較</button>
       <a class="btn" id="csv" href="/api/samples.csv" download>表示中をCSVエクスポート</a>
+      <button class="btn" id="openDeleted">削除済みサンプル</button>
     </div>
     <div class="wrapper">
       <table>
         <thead><tr>
           <th style="width:34px"><input type="checkbox" id="chkAll" aria-label="表示中をすべて選択"></th>
           <th>サンプル番号</th><th>作成日</th><th>配合</th>
-          <th class="num">総量 g</th><th class="num">回転数</th><th class="num">ダイ温度</th>
-          <th class="num">トルク</th><th>判定</th><th>外観・所見</th>
+          <th class="num">作成量 g</th><th class="num">回転数 rpm</th><th class="num">ダイ温度 ℃</th>
+          <th class="num">トルク %</th><th>判定</th><th>外観・所見</th>
         </tr></thead>
         <tbody id="lRows"></tbody>
       </table>
@@ -204,11 +218,12 @@
   </div>
 </section>
 
-<section id="tab-compare" hidden>
+<section id="tab-compare" role="tabpanel" hidden>
   <div class="panel cmp-panel">
     <h2>比較</h2>
     <div class="bar">
       <label style="font-size:12px"><input type="checkbox" id="cOnlyDiff"> 差のある行だけ表示</label>
+      <span class="hint" id="cNote" style="padding:0"></span>
     </div>
     <div class="wrapper"><table class="cmp"><tbody id="cRows"></tbody></table></div>
     <div class="legend"><span><span class="swatch"></span>値が揃っていない行（＝振った条件・出た差）</span></div>
@@ -217,19 +232,22 @@
 
 </main>
 
-<dialog id="matDlg">
+<dialog id="matDlg" aria-labelledby="mTitle">
   <form method="dialog" id="matForm">
-    <h2>原料マスタに登録</h2>
+    <h2 id="mTitle">原料マスタに登録</h2>
     <div class="body">
-      <div class="field"><label for="mName">原料名</label><input id="mName" required placeholder="例: 酸化防止剤MB AO-50MB"></div>
+      <div class="note" id="mUsedNote" hidden style="margin-top:0">配合やサンプルで使われているため、名前・種別・有効成分 % は変更できません。間違っている場合は「使用停止」にして、正しい内容で新しく登録してください。</div>
+      <div class="field"><label for="mName">原料名 <span class="req" aria-hidden="true">*</span></label><input id="mName" required placeholder="例: 酸化防止剤MB AO-50MB"></div>
       <div class="field"><label for="mKind">種別</label>
         <select id="mKind"><option value="additive">添加剤</option><option value="resin">樹脂（ベース樹脂）</option></select>
       </div>
-      <div class="field"><label for="mActive">有効成分 %（純品なら 100、50% MB なら 50）</label>
+      <div class="field"><label for="mActive">有効成分 wt% <span class="req" aria-hidden="true">*</span>（純品なら 100、50% MB なら 50）</label>
         <input type="number" id="mActive" step="any" min="0" max="100" required placeholder="必須">
       </div>
       <div class="field"><label for="mSupplier">メーカー・購入先</label><input id="mSupplier"></div>
+      <div class="field"><label for="mCaution">取扱注意（秤量表に表示されます）</label><input id="mCaution" placeholder="例: 吸湿性あり／粉じん注意／分解温度 230℃"></div>
       <div class="field"><label for="mMemo">メモ</label><input id="mMemo"></div>
+      <label id="mArchivedField" class="check"><input type="checkbox" id="mArchived"> 使用停止（新しい配合の選択肢に出さない）</label>
       <div id="mAlert"></div>
     </div>
     <div class="actions">
@@ -239,10 +257,39 @@
   </form>
 </dialog>
 
+<dialog id="matListDlg" class="wide" aria-labelledby="matListTitle">
+  <h2 id="matListTitle">原料マスタ</h2>
+  <div class="body">
+    <div class="wrapper">
+      <table>
+        <thead><tr><th>原料名</th><th>種別</th><th class="num">有効成分 wt%</th><th>メーカー</th><th>取扱注意</th><th class="num">使用数</th><th></th></tr></thead>
+        <tbody id="matRows"></tbody>
+      </table>
+    </div>
+  </div>
+  <div class="actions">
+    <button type="button" class="btn" id="matListAdd">＋ 原料を登録</button>
+    <button type="button" class="btn" id="matListClose" style="margin-left:auto">閉じる</button>
+  </div>
+</dialog>
+
+<dialog id="delDlg" class="wide" aria-labelledby="delTitle">
+  <h2 id="delTitle">削除済みサンプル</h2>
+  <div class="body">
+    <div class="wrapper">
+      <table>
+        <thead><tr><th>サンプル番号</th><th>配合</th><th>作成日</th><th>削除日時</th><th>削除した人</th><th></th></tr></thead>
+        <tbody id="delRows"></tbody>
+      </table>
+    </div>
+  </div>
+  <div class="actions"><button type="button" class="btn" id="delClose">閉じる</button></div>
+</dialog>
+
 <dialog id="histDlg" class="wide" aria-labelledby="histTitle">
   <h2 id="histTitle">変更前との差分</h2>
   <div class="body">
-    <div class="wrapper"><table class="cmp"><tbody id="histRows"></tbody></table></div>
+    <div class="wrapper"><table class="cmp hist"><tbody id="histRows"></tbody></table></div>
   </div>
   <div class="actions"><button type="button" class="btn" id="histClose">閉じる</button></div>
 </dialog>

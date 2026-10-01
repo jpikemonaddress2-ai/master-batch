@@ -52,18 +52,53 @@ export function targetWeighings(totalG, baseMaterialId, items) {
  *
  * @param {{row_type:string, target_active_pct:?number, active_pct_snapshot:?number,
  *          target_g:number, actual_g:?number}[]} rows
- * @returns {{total:number, rows:Array<object & {real_pct:number, delta:number}>}}
- *   real_pct / delta（狙いとの差, pt）はベース樹脂の行では NaN
+ * @returns {{total:number, entered:boolean, rows:Array<object & {real_pct:number, delta:number, estimated:boolean}>}}
+ *   real_pct / delta（狙いとの差, pt）はベース樹脂の行では NaN。
+ *   entered: 実秤量が1行でも入っている。
+ *   estimated: 実秤量が入っている行と入っていない行が混ざっていて、補完した値で出した実濃度
  */
 export function calcActual(rows) {
   const used = r => Number.isFinite(r.actual_g) ? r.actual_g : r.target_g;
   const total = rows.reduce((s, r) => s + (Number.isFinite(used(r)) ? used(r) : 0), 0);
+  const entered = rows.some(r => Number.isFinite(r.actual_g));
+  const partial = entered && rows.some(r => !Number.isFinite(r.actual_g));
   return {
     total,
+    entered,
     rows: rows.map(r => {
-      if (r.row_type !== 'additive' || !(total > 0)) return { ...r, real_pct: NaN, delta: NaN };
+      if (r.row_type !== 'additive' || !(total > 0)) return { ...r, real_pct: NaN, delta: NaN, estimated: false };
       const real = used(r) * r.active_pct_snapshot / total;
-      return { ...r, real_pct: real, delta: real - r.target_active_pct };
+      return { ...r, real_pct: real, delta: real - r.target_active_pct, estimated: partial };
     }),
+  };
+}
+
+// 実秤量が狙い量からこの割合を超えてずれたら、桁違いなどの取り違えを疑って知らせる
+export const WEIGH_TOLERANCE = 0.1;
+
+/** 実秤量が狙い量から WEIGH_TOLERANCE を超えてずれている行 */
+export function weighOutliers(rows) {
+  return rows.filter(r => Number.isFinite(r.actual_g) && r.target_g > 0 &&
+    Math.abs(r.actual_g - r.target_g) / r.target_g > WEIGH_TOLERANCE);
+}
+
+/**
+ * 配合の組成（ベース樹脂と、添加剤ごとの狙い濃度）を比較用の文字列にする。
+ * 名前やメモの変更は含めない。配合の組成ロックと、新規サンプル保存時の「配合が変わったか」の判定に使う
+ */
+export function compositionSig(baseMaterialId, items) {
+  return JSON.stringify([Number(baseMaterialId), items
+    .map(i => [Number(i.material_id), Number(i.target_active_pct)])
+    .sort((a, b) => a[0] - b[0])]);
+}
+
+/** 保存済みサンプルの秤量明細（スナップショット）から、狙い量の計算元を作る */
+export function basisFromWeighings(weighings) {
+  return {
+    base_material_id: weighings.find(w => w.row_type === 'base').material_id,
+    items: weighings.filter(w => w.row_type === 'additive').map(w => ({
+      material_id: w.material_id, target_active_pct: w.target_active_pct,
+      active_pct: w.active_pct_snapshot, name: w.material_name,
+    })),
   };
 }

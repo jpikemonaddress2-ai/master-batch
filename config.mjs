@@ -13,11 +13,15 @@ export const PORT = Number(process.env.MB_PORT) || 5173;
 export const HOST = process.env.MB_HOST || '127.0.0.1';
 
 // 受け付けるアドレス（Host ヘッダ）の追加分。localhost・このPC名・このPCのIPアドレスは自動で許可される。
-// 社内DNSの完全な名前（例: 'pu.example.local'）で開く場合はここに足す。
-export const EXTRA_HOSTS = (process.env.MB_EXTRA_HOSTS || '').split(',').map(s => s.trim()).filter(Boolean);
+// 社内DNSの完全な名前で開く場合は、下の配列に '' で囲んで足す（ポート番号は書かない）。
+export const EXTRA_HOSTS = [
+  // 'pu.example.local',
+  ...(process.env.MB_EXTRA_HOSTS || '').split(',').map(s => s.trim()).filter(Boolean),
+];
 
 // 押出機のバレル温度ゾーン数。実機に合わせてこの数字を変えるだけで
 // 入力欄・比較表・CSV の列がすべて追従する。
+// 減らしても、それより前に記録したサンプルの温度は消えない（比較表・CSV・編集画面に残る）。
 export const BARREL_ZONES = 8;
 
 export const DB_PATH = process.env.MB_DB || join(ROOT, 'data', 'masterbatch.db');

@@ -1,30 +1,21 @@
 // 画面2: サンプル記録
-import { targetWeighings, calcActual } from './calc.mjs';
+import { targetWeighings, calcActual, weighOutliers, compositionSig, basisFromWeighings, WEIGH_TOLERANCE } from './calc.mjs';
 import { COND_FIELDS, JUDGEMENTS } from './fields.mjs';
+import { fmtDelta } from './format.mjs';
 import { buildMatrix } from './matrix.mjs';
 import {
-  $, esc, fmt, toNum, alertBox, api, toast, state, matById, recipeById, reloadMasters,
-  registerDirty, rememberedAuthor, rememberAuthor, today, showAlertWithAction,
+  $, esc, fmt, fmtGram, fmtVal, toNum, alertBox, api, toast, state, matById, recipeById, reloadMasters,
+  createDirty, rememberedAuthor, rememberAuthor, today, showAlertWithAction,
 } from './common.js';
 
-let samples = [];      // 左の一覧
+const RECENT = 50;     // 左の一覧に出す件数
+let samples = [];      // 最近のサンプル（左の一覧・引用元・番号の提案に使う）
 let extraLabels = [];  // 自由項目で過去に使った項目名
 let draft = null;      // 編集中のサンプル
-let dirty = false;
+const dirty = createDirty('#sDirtyMark', '保存していないサンプルの変更があります。破棄してよろしいですか？');
 
 const zones = () => state.config.barrelZones;
 const rowKey = r => `${r.row_type}:${r.material_id}`;
-
-registerDirty(() => dirty);
-
-function setDirty(v) {
-  dirty = v;
-  $('#sDirtyMark').hidden = !v;
-}
-
-function confirmDiscard() {
-  return !dirty || confirm('保存していないサンプルの変更があります。破棄してよろしいですか？');
-}
 
 /* ===================== 下書きの作成 ===================== */
 
@@ -53,8 +44,7 @@ function suggestCode() {
 
 function blankDraft(recipe) {
   return {
-    id: null, version: null,
-    recipe_id: recipe?.id ?? null, recipe_version: recipe?.version ?? null,
+    id: null, version: null, recipe_id: recipe?.id ?? null,
     code: suggestCode(), made_on: today(), total_qty_g: recipe?.default_qty_g ?? 1000,
     created_by: rememberedAuthor(),
     barrel_temps: Array(zones()).fill(null), die_temp_c: null,
@@ -62,15 +52,16 @@ function blankDraft(recipe) {
     judgement: null, appearance_note: '', memo: '',
     extras: [], actuals: {}, lots: {}, basis: basisFromRecipe(recipe),
     source_id: null, source_code: null,   // 引用元のサンプル（画面表示用）
+    changed: new Set(),                   // 他の人の配合変更で狙い量が変わった行（強調表示用）
   };
 }
 
 function fromSample(s) {
-  const base = s.weighings.find(w => w.row_type === 'base');
   return {
-    id: s.id, version: s.version, recipe_id: s.recipe_id, recipe_version: null,
+    id: s.id, version: s.version, recipe_id: s.recipe_id,
     code: s.code, made_on: s.made_on ?? '', total_qty_g: s.total_qty_g, created_by: s.created_by ?? '',
-    barrel_temps: Array.from({ length: zones() }, (_, i) => s.barrel_temps[i] ?? null),
+    // ゾーン数を減らした後でも、記録済みのゾーンの温度は落とさない（画面に出ない分もそのまま保存し直す）
+    barrel_temps: Array.from({ length: Math.max(zones(), s.barrel_temps.length) }, (_, i) => s.barrel_temps[i] ?? null),
     die_temp_c: s.die_temp_c,
     ...Object.fromEntries(COND_FIELDS.map(f => [f.key, s[f.key]])),
     judgement: s.judgement, appearance_note: s.appearance_note ?? '', memo: s.memo ?? '',
@@ -78,19 +69,16 @@ function fromSample(s) {
     actuals: Object.fromEntries(s.weighings.map(w => [rowKey(w), w.actual_g])),
     lots: Object.fromEntries(s.weighings.map(w => [rowKey(w), w.lot ?? ''])),
     created_at: s.created_at, updated_at: s.updated_at,
-    basis: {
-      base_material_id: base.material_id,
-      items: s.weighings.filter(w => w.row_type === 'additive').map(w => ({
-        material_id: w.material_id, target_active_pct: w.target_active_pct,
-        active_pct: w.active_pct_snapshot, name: w.material_name,
-      })),
-    },
+    basis: basisFromWeighings(s.weighings),
+    changed: new Set(),
   };
 }
 
 /* ===================== 一覧 ===================== */
 async function reloadSamples() {
-  [samples, extraLabels] = await Promise.all([api('GET', '/api/samples'), api('GET', '/api/extra-labels')]);
+  [samples, extraLabels] = await Promise.all([
+    api('GET', `/api/samples?limit=${RECENT}`), api('GET', '/api/extra-labels'),
+  ]);
   drawSampleList();
   drawLabelLists();
   document.dispatchEvent(new Event('samples-changed'));
@@ -102,13 +90,14 @@ function drawSampleList() {
     box.innerHTML = '<div class="hint" style="padding:12px 14px">サンプルはまだありません。</div>';
     return;
   }
-  box.innerHTML = samples.slice(0, 50).map(s => `
+  box.innerHTML = samples.map(s => `
     <button type="button" class="list-item ${s.id === draft?.id ? 'on' : ''}" data-id="${s.id}" ${s.id === draft?.id ? 'aria-current="true"' : ''}>
       <span class="code">${esc(s.code)}</span>
       ${s.judgement ? `<span class="tag ${s.judgement}" style="float:right">${JUDGEMENTS[s.judgement]}</span>` : ''}
       <span class="nm">${esc(s.recipe_code)} ${esc(s.recipe_name)}</span>
       <span class="meta">${esc(s.made_on ?? '')}${s.created_by ? ` / ${esc(s.created_by)}` : ''}</span>
-    </button>`).join('');
+    </button>`).join('') +
+    (samples.length >= RECENT ? `<div class="hint" style="padding:8px 14px">最新 ${RECENT} 件を表示。それより前は「サンプル一覧」から開けます。</div>` : '');
   box.querySelectorAll('.list-item').forEach(el => el.onclick = () => openSample(Number(el.dataset.id)));
 }
 
@@ -118,11 +107,12 @@ function drawSampleList() {
  */
 export async function openSample(id, { force = false } = {}) {
   if (!force && id === draft?.id) return true;
-  if (!force && !confirmDiscard()) return false;
+  if (!force && !dirty.confirmDiscard()) return false;
   try {
     openDraft(fromSample(await api('GET', `/api/samples/${id}`)));
     return true;
   } catch (e) {
+    $('#sAlert').innerHTML = alertBox(`サンプルを開けませんでした: ${e.message}`);
     toast(e.message);
     return false;
   }
@@ -138,7 +128,7 @@ function drawLabelLists() {
 /* ===================== 編集フォーム ===================== */
 function openDraft(d) {
   draft = d;
-  setDirty(false);
+  dirty.set(false);
   $('#sAlert').innerHTML = '';
   drawSampleList();
   drawForm();
@@ -151,6 +141,7 @@ function drawRecipeSelect() {
     : '<option value="">（先に「配合」タブで配合を登録してください）</option>';
   // 既存サンプルの配合は変えられない（秤量のスナップショットが配合に紐づくため）
   sel.disabled = draft.id !== null || !state.recipes.length;
+  sel.title = draft.id !== null ? '保存済みのサンプルの配合は変更できません（別の配合なら新規に作成してください）' : '';
   if (draft.id !== null && !recipeById(draft.recipe_id)) sel.innerHTML = '<option>（不明な配合）</option>';
 }
 
@@ -175,9 +166,11 @@ function drawForm() {
   if (!isNew) $('#sEditor').value = rememberedAuthor();
   $('#sSourceField').hidden = !isNew;
   drawSourceSelect();
-  $('#sMeta').textContent = isNew
+  const hidden = draft.barrel_temps.length - zones();
+  $('#sMeta').textContent = (isNew
     ? (draft.source_code ? `新規サンプル（${draft.source_code} から引用。実秤量・ロット・評価・測定値の値は空です）` : '新規サンプル')
-    : `作成 ${draft.created_at}（${draft.created_by || '記入者なし'}）／ 最終更新 ${draft.updated_at}`;
+    : `作成 ${draft.created_at}（${draft.created_by || '記入者なし'}）／ 最終更新 ${draft.updated_at}`) +
+    (hidden > 0 ? `　※ 設定より多い ${hidden} ゾーン分のバレル温度が記録されています（比較表・CSV に出ます）` : '');
   drawWeigh();
   drawExtras('condition');
   drawExtras('measurement');
@@ -206,21 +199,28 @@ async function drawHistory() {
     const i = Number(b.dataset.h);
     try {
       const after = i === 0 ? await api('GET', `/api/samples/${id}`) : hist[i - 1].snapshot;
-      showHistoryDiff(hist[i], after);
+      showSampleDiff(`${hist[i].changed_at} ${hist[i].changed_by} による変更`, hist[i].snapshot, after);
     } catch (e) {
       toast(e.message);
     }
   });
 }
 
-function showHistoryDiff(h, after) {
-  // 監査用なので、比較表では差分にしないサンプル番号・作成日・記入者の書き換えも出す
-  const rows = buildMatrix([h.snapshot, after], zones(), { allDiff: true }).filter(r => r.diff);
-  $('#histTitle').textContent = `${h.changed_at} ${h.changed_by} による変更`;
-  $('#histRows').innerHTML = rows.length
-    ? '<tr><th scope="col">項目</th><th scope="col">変更前</th><th scope="col">変更後</th></tr>' + rows.map(r => `<tr class="diff">
-        <td>${esc(r.label)}${r.unit ? ` (${esc(r.unit)})` : ''}</td>${r.cells.map(v => `<td>${v === '' ? '—' : esc(v)}</td>`).join('')}</tr>`).join('')
-    : '<tr><td class="empty">内容の変更はありません（保存のみ）。</td></tr>';
+/** 2つの版の差分をダイアログに出す。after が null なら before の内容をそのまま一覧にする（削除済みの閲覧） */
+export function showSampleDiff(title, before, after) {
+  $('#histTitle').textContent = title;
+  if (!after) {
+    const rows = buildMatrix([before], zones()).filter(r => r.cells[0] !== '');
+    $('#histRows').innerHTML = '<tr><th scope="col">項目</th><th scope="col">削除前の内容</th></tr>' + rows.map(r =>
+      `<tr><td>${esc(r.label)}${r.unit ? ` (${esc(r.unit)})` : ''}</td><td>${esc(r.cells[0])}</td></tr>`).join('');
+  } else {
+    // 監査用なので、比較表では差分にしないサンプル番号・作成日・記入者の書き換えも出す
+    const rows = buildMatrix([before, after], zones(), { allDiff: true }).filter(r => r.diff);
+    $('#histRows').innerHTML = rows.length
+      ? '<tr><th scope="col">項目</th><th scope="col">変更前</th><th scope="col">変更後</th></tr>' + rows.map(r => `<tr class="diff">
+          <td>${esc(r.label)}${r.unit ? ` (${esc(r.unit)})` : ''}</td>${r.cells.map(v => `<td>${v === '' ? '—' : esc(v)}</td>`).join('')}</tr>`).join('')
+      : '<tr><td class="empty">内容の変更はありません（保存のみ）。</td></tr>';
+  }
   $('#histDlg').showModal();
 }
 $('#histClose').onclick = () => $('#histDlg').close();
@@ -241,55 +241,63 @@ function drawWeigh() {
   }
   const { rows } = currentRows();
   $('#sWeigh').innerHTML = rows.map((r, i) => {
-    const name = r.row_type === 'base' ? (matById(r.material_id)?.name ?? '（不明な原料）') : draft.basis.items[i].name;
+    const mat = matById(r.material_id);
+    const name = r.row_type === 'base' ? (mat?.name ?? '（不明な原料）') : draft.basis.items[i].name;
     const key = rowKey(r);
+    const caution = mat?.caution ? `<div class="caution">⚠ ${esc(mat.caution)}</div>` : '';
     const lot = `<input style="width:100%" data-lot="${key}" value="${esc(draft.lots[key] ?? '')}" aria-label="${esc(name)} のロット">`;
     const actual = `<input type="number" step="any" min="0" style="width:100%" data-key="${key}" value="${r.actual_g ?? ''}" aria-label="${esc(name)} の実秤量 g">`;
+    const cls = draft.changed.has(key) ? 'class="changed"' : '';
     if (r.row_type === 'base') {
-      return `<tr>
-        <td>${esc(name)} <span style="color:var(--sub);font-size:11px">（ベース樹脂・差引）</span></td>
+      return `<tr ${cls}>
+        <td>${esc(name)} <span style="color:var(--sub);font-size:11px">（ベース樹脂・差引）</span>${caution}</td>
         <td class="num">—</td><td class="num">—</td>
-        <td class="num" data-target="${i}"></td><td>${lot}</td><td class="num">${actual}</td>
+        <td class="num" data-target="${i}"></td><td>${lot}</td><td class="num" data-actual="${i}">${actual}</td>
         <td class="num">—</td><td class="num">—</td></tr>`;
     }
-    return `<tr>
-      <td>${esc(name)}</td>
-      <td class="num">${fmt(r.target_active_pct, 2)}</td><td class="num">${fmt(r.active_pct_snapshot, 0)}</td>
-      <td class="num" data-target="${i}"></td><td>${lot}</td><td class="num">${actual}</td>
+    return `<tr ${cls}>
+      <td>${esc(name)}${caution}</td>
+      <td class="num">${fmtVal(r.target_active_pct)}</td><td class="num">${fmtVal(r.active_pct_snapshot)}</td>
+      <td class="num" data-target="${i}"></td><td>${lot}</td><td class="num" data-actual="${i}">${actual}</td>
       <td class="num"><b data-real="${i}"></b></td><td class="num delta" data-delta="${i}"></td></tr>`;
   }).join('');
   $('#sWeigh').querySelectorAll('input[data-key]').forEach(el => el.oninput = () => {
     draft.actuals[el.dataset.key] = toNum(el.value);
-    setDirty(true); calcSample();
+    dirty.set(true); calcSample();
   });
   $('#sWeigh').querySelectorAll('input[data-lot]').forEach(el => el.oninput = () => {
     draft.lots[el.dataset.lot] = el.value;
-    setDirty(true);
+    dirty.set(true);
   });
   calcSample();
 }
 
 function calcSample() {
-  if (!draft.basis) return;
+  if (!draft?.basis) return;
   const { rows, over } = currentRows();
   const a = calcActual(rows);
+  const outliers = new Set(weighOutliers(rows).map(rowKey));
   a.rows.forEach((r, i) => {
-    $(`#sWeigh [data-target="${i}"]`).textContent = fmt(r.target_g, 1);
+    $(`#sWeigh [data-target="${i}"]`).textContent = fmtGram(r.target_g);
+    $(`#sWeigh [data-actual="${i}"]`).classList.toggle('outlier', outliers.has(rowKey(r)));
     if (r.row_type !== 'additive') return;
-    $(`#sWeigh [data-real="${i}"]`).textContent = fmt(r.real_pct, 3);
+    $(`#sWeigh [data-real="${i}"]`).innerHTML = Number.isNaN(r.real_pct) ? '—'
+      : `${fmt(r.real_pct, 3)}${r.estimated ? '<small class="est" title="実秤量が未入力の行を狙い量で補った推定値">推定</small>' : ''}`;
     const cell = $(`#sWeigh [data-delta="${i}"]`);
     const d = r.delta;
-    cell.className = `num delta ${Number.isNaN(d) ? '' : Math.abs(d) < 0.0005 ? 'zero' : d > 0 ? 'plus' : 'minus'}`;
-    cell.textContent = Number.isNaN(d) ? '—' : `${d > 0 ? '+' : ''}${fmt(d, 3)} pt`;
+    const s = fmtDelta(d, 3);
+    cell.className = `num delta ${!s ? '' : Number(s) === 0 ? 'zero' : d > 0 ? 'plus' : 'minus'}`;
+    cell.textContent = s ? `${s} pt` : '—';
   });
   const qty = draft.total_qty_g || 0;
-  const entered = rows.some(r => Number.isFinite(r.actual_g));
   const diff = a.total - qty;
   $('#sSummary').innerHTML = `
-    <div><div class="k">狙い総量</div><div class="v">${fmt(qty, 1)}<small>g</small></div></div>
-    <div><div class="k">実測総量${entered ? '' : '（未入力）'}</div><div class="v">${entered ? fmt(a.total, 1) : '—'}<small>g</small></div></div>
-    <div><div class="k">総量差（実測−狙い）</div><div class="v">${entered ? `${diff >= 0 ? '+' : ''}${fmt(diff, 1)}` : '—'}<small>g</small></div></div>`;
-  $('#sWeighAlert').innerHTML = over ? alertBox('配合過剰: 添加剤の合計が作成量を超えています。作成量を見直してください。') : '';
+    <div><div class="k">狙い総量</div><div class="v">${fmtGram(qty)}<small>g</small></div></div>
+    <div><div class="k">実測総量${a.entered ? '' : '（未入力）'}</div><div class="v">${a.entered ? fmtGram(a.total) : '—'}<small>g</small></div></div>
+    <div><div class="k">総量差（実測−狙い）</div><div class="v">${a.entered ? fmtDelta(diff, 1) : '—'}<small>g</small></div></div>`;
+  $('#sWeighAlert').innerHTML =
+    (over ? alertBox('配合過剰: 添加剤の合計が作成量を超えています。作成量を見直してください。') : '') +
+    (outliers.size ? `<div class="warn">実秤量が狙い量から ${WEIGH_TOLERANCE * 100}% 以上ずれている行があります（桁の打ち間違いがないか確認してください）。</div>` : '');
   $('#sSave').disabled = $('#sSaveNext').disabled = over;
 }
 
@@ -297,18 +305,18 @@ function calcSample() {
 function drawExtras(cat) {
   const tbody = $(`#sExtras-${cat}`);
   const idx = draft.extras.map((e, i) => (e.category === cat ? i : -1)).filter(i => i >= 0);
-  tbody.innerHTML = idx.length ? idx.map(i => {
+  tbody.innerHTML = idx.length ? idx.map((i, n) => {
     const e = draft.extras[i];
     return `<tr>
-      <td><input style="width:100%" data-i="${i}" data-f="label" list="dl-${cat}" value="${esc(e.label)}"></td>
-      <td><input style="width:100%" data-i="${i}" data-f="value" value="${esc(e.value)}"></td>
-      <td><input style="width:100%" data-i="${i}" data-f="unit" value="${esc(e.unit)}"></td>
-      <td><button class="del" data-i="${i}">削除</button></td></tr>`;
+      <td><input style="width:100%" data-i="${i}" data-f="label" list="dl-${cat}" value="${esc(e.label)}" aria-label="${n + 1} 行目の項目名"></td>
+      <td><input style="width:100%" data-i="${i}" data-f="value" value="${esc(e.value)}" aria-label="${esc(e.label) || `${n + 1} 行目`} の値"></td>
+      <td><input style="width:100%" data-i="${i}" data-f="unit" value="${esc(e.unit)}" aria-label="${esc(e.label) || `${n + 1} 行目`} の単位"></td>
+      <td><button class="del" data-i="${i}" aria-label="${esc(e.label) || `${n + 1} 行目`} を削除">削除</button></td></tr>`;
   }).join('') : '<tr><td colspan="4" class="hint">項目はありません。</td></tr>';
 
   tbody.querySelectorAll('input[data-f]').forEach(el => el.oninput = () => {
     draft.extras[el.dataset.i][el.dataset.f] = el.value;
-    setDirty(true);
+    dirty.set(true);
   });
   // 既知の項目名を選んだら、単位が空なら過去の単位を入れる
   tbody.querySelectorAll('input[data-f="label"]').forEach(el => el.onchange = () => {
@@ -321,7 +329,7 @@ function drawExtras(cat) {
   });
   tbody.querySelectorAll('button.del').forEach(el => el.onclick = () => {
     draft.extras.splice(Number(el.dataset.i), 1);
-    setDirty(true);
+    dirty.set(true);
     drawExtras('condition');
     drawExtras('measurement');
   });
@@ -329,36 +337,36 @@ function drawExtras(cat) {
 
 function addExtra(cat) {
   draft.extras.push({ category: cat, label: '', value: '', unit: '' });
-  setDirty(true);
+  dirty.set(true);
   drawExtras(cat);
   const inputs = $(`#sExtras-${cat}`).querySelectorAll('input[data-f="label"]');
   inputs[inputs.length - 1]?.focus();
 }
 
 /* ---------- 保存・削除 ---------- */
-async function save(changedBy) {
+function body(changedBy) {
   const { rows } = currentRows();
-  const body = {
+  return {
     ...draft,
-    basis: undefined, lots: undefined,
+    basis: undefined, lots: undefined, changed: undefined,
     changed_by: changedBy,
+    // 画面で見ていた組成。保存までに他の人が配合を変えていたらサーバーが気づけるようにする
+    recipe_sig: compositionSig(draft.basis.base_material_id, draft.basis.items),
     // 値の無い行は保存しない（引用で項目名だけ並べた測定値を、測らなかった場合など）
     extras: draft.extras.filter(e => e.value.trim()),
     actuals: rows.map(r => ({
       material_id: r.material_id, row_type: r.row_type, actual_g: r.actual_g, lot: draft.lots[rowKey(r)] ?? '',
     })),
   };
-  const saved = draft.id === null
-    ? await api('POST', '/api/samples', body)
-    : await api('PUT', `/api/samples/${draft.id}`, body);
-  if (draft.id === null) rememberAuthor(saved.created_by ?? '');
-  await reloadAfterChange();
-  return saved;
 }
 
 // サンプルの件数が変わると配合タブの組成ロックも変わるので、配合も取り直す
 async function reloadAfterChange() {
-  await Promise.all([reloadSamples(), reloadMasters()]);
+  try {
+    await Promise.all([reloadSamples(), reloadMasters()]);
+  } catch (e) {
+    toast(`一覧の更新に失敗しました: ${e.message}`);
+  }
 }
 
 // 保存が競合したときの回復。入力中の内容をできるだけ残す
@@ -366,12 +374,21 @@ async function recoverFromConflict(e) {
   if (e.code === 'recipe_changed') {
     // 他の人が配合を変えた: 最新の配合で狙い量を取り直す（実秤量・ロットは残す）。
     // reloadMasters が masters-changed を発火し、新規の下書きの狙い量を作り直す
+    const before = new Map(draft.basis.items.map(i => [`additive:${i.material_id}`, `${i.target_active_pct}/${i.active_pct}`]));
+    const beforeBase = draft.basis.base_material_id;
     try {
       await reloadMasters();
-      $('#sAlert').innerHTML = alertBox(e.message);
     } catch (err) {
       $('#sAlert').innerHTML = alertBox(`${e.message}（配合の読み直しに失敗しました: ${err.message}）`);
+      return;
     }
+    const now = new Map(draft.basis.items.map(i => [`additive:${i.material_id}`, `${i.target_active_pct}/${i.active_pct}`]));
+    draft.changed = new Set([...now].filter(([k, v]) => before.get(k) !== v).map(([k]) => k));
+    if (draft.basis.base_material_id !== beforeBase) draft.changed.add(`base:${draft.basis.base_material_id}`);
+    const dropped = [...before.keys()].filter(k => !now.has(k) && Number.isFinite(draft.actuals[k]));
+    drawWeigh();
+    $('#sAlert').innerHTML = alertBox(e.message + (dropped.length ? `（配合から外れた添加剤 ${dropped.length} 行の実秤量は使われません）` : '') +
+      '。変わった行を色付けしています。');
   } else if (e.code === 'stale') {
     showAlertWithAction($('#sAlert'), e.message, '最新を読み直す（自分の変更は破棄）',
       () => openSample(draft.id, { force: true }));
@@ -394,27 +411,42 @@ function editorName() {
 
 async function runSave(next) {
   $('#sAlert').innerHTML = '';
+  if (draft.id !== null && !dirty.get() && !next) {
+    toast('変更はありません');
+    return;
+  }
   let changedBy = null;
   if (draft.id !== null) {
     changedBy = editorName();
     if (!changedBy) return;
   }
+  const outliers = weighOutliers(currentRows().rows);
+  if (outliers.length && !confirm(`実秤量が狙い量から ${WEIGH_TOLERANCE * 100}% 以上ずれている行が ${outliers.length} 行あります。\n桁の打ち間違いではありませんか？ このまま保存しますか？`)) {
+    return;
+  }
   $('#sSave').disabled = $('#sSaveNext').disabled = true;
+  let saved;
   try {
-    const saved = await save(changedBy);
-    if (next) {
-      // 同じ配合で条件を振る実験が多いので、今保存したサンプルを引用して次を作る
-      openDraft(draftFromSource(saved, { continued: true }));
-      toast(`「${saved.code}」を保存しました。続けて次のサンプルを入力できます`);
-      $('#sCode').focus();
-    } else {
-      openDraft(fromSample(saved));
-      toast('保存しました');
-    }
+    saved = draft.id === null
+      ? await api('POST', '/api/samples', body(changedBy))
+      : await api('PUT', `/api/samples/${draft.id}`, body(changedBy));
   } catch (e) {
     await recoverFromConflict(e);
-  } finally {
     calcSample();
+    return;
+  }
+  // 保存はできている。一覧の更新に失敗しても、画面は保存済みの内容にする（二重登録を防ぐ）
+  if (draft.id === null) rememberAuthor(saved.created_by ?? '');
+  openDraft(fromSample(saved));
+  await reloadAfterChange();
+  if (next) {
+    // 同じ配合で条件を振る実験が多いので、今保存したサンプルを引用して次を作る
+    openDraft(draftFromSource(saved, { continued: true }));
+    toast(`「${saved.code}」を保存しました。続けて次のサンプルを入力できます`);
+    $('#sCode').focus();
+  } else {
+    drawSampleList();
+    toast('保存しました');
   }
 }
 
@@ -425,10 +457,11 @@ $('#sDelete').onclick = async () => {
   $('#sAlert').innerHTML = '';
   const changedBy = editorName();
   if (!changedBy) return;
-  if (!confirm(`サンプル「${draft.code}」を削除します（変更者: ${changedBy}）。\n一覧からは消えます。削除前の内容はサーバーの変更履歴に残ります。よろしいですか？`)) return;
+  if (!confirm(`サンプル「${draft.code}」を削除します（変更者: ${changedBy}）。\n一覧からは消えます。削除前の内容は「サンプル一覧」の「削除済みサンプル」から見られます。よろしいですか？`)) return;
   try {
     const recipe = recipeById(draft.recipe_id);
     await api('DELETE', `/api/samples/${draft.id}`, { changed_by: changedBy });
+    dirty.set(false);
     await reloadAfterChange();
     openDraft(blankDraft(recipe ?? state.recipes[0]));
     toast('削除しました');
@@ -481,7 +514,7 @@ function drawSourceSelect() {
 }
 
 $('#sSource').onchange = e => {
-  if (!confirmDiscard()) {
+  if (!dirty.confirmDiscard()) {
     drawSourceSelect();
     return;
   }
@@ -492,12 +525,12 @@ $('#sSource').onchange = e => {
 
 // 開いている既存サンプルを元に新規作成
 $('#sCopy').onclick = () => {
-  if (!confirmDiscard()) return;
+  if (!dirty.confirmDiscard()) return;
   copyFrom(draft.id);
 };
 
 $('#newSample').onclick = () => {
-  if (!confirmDiscard()) return;
+  if (!dirty.confirmDiscard()) return;
   openDraft(blankDraft(recipeById(draft?.recipe_id) ?? state.recipes[0]));
 };
 
@@ -508,51 +541,52 @@ $('#addMeas').onclick = () => addExtra('measurement');
 function bind(sel, key, conv = v => v, after) {
   $(sel).addEventListener('input', e => {
     draft[key] = conv(e.target.value);
-    setDirty(true);
+    dirty.set(true);
     after?.();
   });
 }
 
 $('#sRecipe').onchange = e => {
-  const entered = Object.values(draft.actuals).some(v => Number.isFinite(v)) ||
-    Object.values(draft.lots).some(v => v);
+  // いま表に出ている行に入力があるか（配合から外れた行の古い入力は数えない）
+  const keys = draft.basis ? currentRows().rows.map(rowKey) : [];
+  const entered = keys.some(k => Number.isFinite(draft.actuals[k]) || draft.lots[k]);
   if (entered && !confirm('配合を変えると、入力済みの実秤量とロットがクリアされ、作成量は配合の基準量に戻ります。よろしいですか？')) {
     e.target.value = draft.recipe_id;
     return;
   }
   const r = recipeById(Number(e.target.value));
   Object.assign(draft, {
-    recipe_id: r.id, recipe_version: r.version, total_qty_g: r.default_qty_g,
-    basis: basisFromRecipe(r), actuals: {}, lots: {},
+    recipe_id: r.id, total_qty_g: r.default_qty_g,
+    basis: basisFromRecipe(r), actuals: {}, lots: {}, changed: new Set(),
   });
   $('#sQty').value = r.default_qty_g;
-  setDirty(true);
+  dirty.set(true);
   drawWeigh();
 };
 
-// 配合タブで配合が保存されたら、新規サンプルの狙い量も最新の配合で作り直す
+// 配合が保存されたら、新規サンプルの狙い量も最新の配合で作り直す
 document.addEventListener('masters-changed', () => {
   if (!draft) return;
   if (draft.id === null) {
-    const r = recipeById(draft.recipe_id) ?? (draft.recipe_id === null || !dirty ? state.recipes[0] : null);
-    if (r) Object.assign(draft, { recipe_id: r.id, recipe_version: r.version, basis: basisFromRecipe(r) });
+    const r = recipeById(draft.recipe_id) ?? (draft.recipe_id === null || !dirty.get() ? state.recipes[0] : null);
+    if (r) Object.assign(draft, { recipe_id: r.id, basis: basisFromRecipe(r) });
     drawRecipeSelect();
     drawWeigh();
   } else {
     drawRecipeSelect();
+    drawWeigh();   // 原料の取扱注意の変更を反映
   }
 });
 
 /** 配合タブの「この配合でサンプルを作る」から呼ばれる。破棄を断られたら false */
 export function newSampleFor(recipeId) {
-  if (!confirmDiscard()) return false;
+  if (!dirty.confirmDiscard()) return false;
   openDraft(blankDraft(recipeById(recipeId)));
   return true;
 }
 
 export async function initSampleTab() {
   // バレル温度と運転条件の入力欄は設定（ゾーン数・項目定義）から作る
-  $('#sZones').style.gridTemplateColumns = `repeat(${zones() + 1}, minmax(0, 1fr))`;
   $('#sZones').innerHTML = Array.from({ length: zones() }, (_, i) =>
     `<div class="field"><label for="sZ${i}">C${i + 1}</label><input type="number" step="any" id="sZ${i}" data-z="${i}"></div>`
   ).join('') + '<div class="field"><label for="s_die_temp_c">ダイ</label><input type="number" step="any" id="s_die_temp_c"></div>';
@@ -562,7 +596,7 @@ export async function initSampleTab() {
 
   document.querySelectorAll('#sZones input[data-z]').forEach(el => el.addEventListener('input', () => {
     draft.barrel_temps[el.dataset.z] = toNum(el.value);
-    setDirty(true);
+    dirty.set(true);
   }));
   bind('#s_die_temp_c', 'die_temp_c', toNum);
   for (const f of COND_FIELDS) bind(`#s_${f.key}`, f.key, toNum);
@@ -574,7 +608,7 @@ export async function initSampleTab() {
   bind('#sMemo', 'memo');
   document.querySelectorAll('input[name="sJudge"]').forEach(el => el.addEventListener('change', () => {
     draft.judgement = el.value || null;
-    setDirty(true);
+    dirty.set(true);
   }));
 
   await reloadSamples();

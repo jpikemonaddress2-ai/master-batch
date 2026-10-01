@@ -4,10 +4,13 @@ import { join, normalize, extname, sep } from 'node:path';
 import { hostname, networkInterfaces } from 'node:os';
 import { exec } from 'node:child_process';
 import { PORT, HOST, PUBLIC_DIR, BARREL_ZONES, EXTRA_HOSTS } from './config.mjs';
+import { allowedHostSet, checkRequest } from './guard.mjs';
 import * as store from './db.mjs';
 
 const { HttpError } = store;
 
+// 配信するファイルの種類。ここに無い拡張子は返さない
+// （Windows の予約名 CON / AUX などを開こうとして止まるのも防ぐ）
 const MIME = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',
@@ -18,8 +21,14 @@ const MIME = {
   '.ico': 'image/x-icon',
 };
 
-function send(res, status, body, type = 'application/json; charset=utf-8') {
-  res.writeHead(status, { 'Content-Type': type, 'Cache-Control': 'no-store' });
+const SECURITY_HEADERS = {
+  'X-Content-Type-Options': 'nosniff',
+  'X-Frame-Options': 'DENY',   // 他のサイトに埋め込ませない（削除ボタンなどを押させる手口を防ぐ）
+  'Cache-Control': 'no-store',
+};
+
+function send(res, status, body, type = 'application/json; charset=utf-8', headers = {}) {
+  res.writeHead(status, { ...SECURITY_HEADERS, 'Content-Type': type, ...headers });
   res.end(typeof body === 'string' || Buffer.isBuffer(body) ? body : JSON.stringify(body));
 }
 
@@ -41,56 +50,45 @@ async function readJson(req) {
   return body;
 }
 
-/* ---------- 外部サイトからの書き込み・読み出しを防ぐ ----------
- * 認証が無いので、社員が開いた外部の Web ページからこのサーバーへ送られる要求を拒否する。
- * - Host 検証: DNS rebinding（外部ドメインをこのPCのアドレスに向ける手口）対策
- * - Origin 検証と Content-Type: application/json の強制: CSRF（フォームや no-cors fetch からの POST）対策 */
-const allowedHosts = new Set([
-  'localhost', '127.0.0.1', '[::1]', hostname().toLowerCase(),
-  ...Object.values(networkInterfaces()).flat()
-    .map(i => (i.family === 'IPv6' ? `[${i.address.split('%')[0]}]` : i.address).toLowerCase()),
-  ...EXTRA_HOSTS.map(h => h.toLowerCase()),
-]);
-const stripPort = h => h.toLowerCase().replace(/:\d+$/, '');
+// 受け付けるアドレス。IP は DHCP や VPN で変わるので、知らないアドレスで来たら一度だけ作り直して確かめる
+const buildAllowed = () => allowedHostSet({ hostname: hostname(), interfaces: networkInterfaces(), extra: EXTRA_HOSTS });
+let allowedHosts = buildAllowed();
 
-function checkRequest(req, url) {
-  const host = req.headers.host ?? '';
-  if (!allowedHosts.has(stripPort(host))) {
-    throw new HttpError(403, `このアドレス（${host}）からは利用できません。config.mjs の EXTRA_HOSTS を確認してください`);
+function guard(req, url) {
+  const r = { method: req.method, path: url.pathname, headers: req.headers };
+  let bad = checkRequest(r, allowedHosts);
+  if (bad?.status === 403) {
+    allowedHosts = buildAllowed();
+    bad = checkRequest(r, allowedHosts);
   }
-  if (!url.pathname.startsWith('/api/') || req.method === 'GET' || req.method === 'HEAD') return;
-  const origin = req.headers.origin;
-  if (origin !== undefined) {
-    let originHost = '';
-    try { originHost = new URL(origin).host.toLowerCase(); } catch { /* 'null' など */ }
-    if (originHost !== host.toLowerCase()) throw new HttpError(403, '他のサイトからの要求は受け付けません');
-  }
-  if (!/^application\/json\b/i.test(req.headers['content-type'] ?? '')) {
-    throw new HttpError(415, 'Content-Type は application/json にしてください');
-  }
+  if (bad) throw new HttpError(bad.status, bad.message);
 }
 
-// [メソッド, パスの正規表現, 処理(req, params, query)]。正規表現のキャプチャを params、クエリ文字列を query として渡す。
-// 処理の戻り値は JSON で返す。Csv を返したときだけ CSV ファイルとしてダウンロードさせる
 class Csv { constructor(body, filename) { this.body = body; this.filename = filename; } }
 const filters = q => Object.fromEntries(['recipe', 'from', 'to', 'judgement', 'q'].map(k => [k, q.get(k) || null]));
 const stamp = () => new Date().toLocaleDateString('sv-SE').replaceAll('-', '');
 
+// [メソッド, パスの正規表現, 処理(req, params, query)]。正規表現のキャプチャを params、クエリ文字列を query として渡す。
+// 処理の戻り値は JSON で返す。Csv を返したときだけ CSV ファイルとしてダウンロードさせる
 const routes = [
   ['GET', /^\/api\/config$/, () => ({ barrelZones: BARREL_ZONES })],
   ['GET', /^\/api\/materials$/, () => store.listMaterials()],
   ['POST', /^\/api\/materials$/, async req => store.createMaterial(await readJson(req))],
+  ['PUT', /^\/api\/materials\/(\d+)$/, async (req, [id]) => store.updateMaterial(Number(id), await readJson(req))],
   ['GET', /^\/api\/recipes$/, () => store.listRecipes()],
   ['GET', /^\/api\/recipes\/(\d+)$/, (req, [id]) => store.getRecipe(Number(id))],
+  ['GET', /^\/api\/recipes\/(\d+)\/history$/, (req, [id]) => store.listRecipeHistory(Number(id))],
   ['POST', /^\/api\/recipes$/, async req => store.saveRecipe(await readJson(req))],
   ['PUT', /^\/api\/recipes\/(\d+)$/, async (req, [id]) => store.saveRecipe(await readJson(req), Number(id))],
-  ['GET', /^\/api\/samples$/, (req, p, q) => store.listSamples(filters(q))],
+  ['GET', /^\/api\/samples$/, (req, p, q) => store.listSamples(filters(q), { limit: Number(q.get('limit')) || null })],
+  ['GET', /^\/api\/samples\/count$/, () => ({ count: store.countSamples() })],
   ['GET', /^\/api\/samples\.csv$/, (req, p, q) => new Csv(store.samplesCsv(filters(q)), `samples_${stamp()}.csv`)],
   ['GET', /^\/api\/samples\/(\d+)$/, (req, [id]) => store.getSample(Number(id))],
   ['POST', /^\/api\/samples$/, async req => store.saveSample(await readJson(req))],
   ['PUT', /^\/api\/samples\/(\d+)$/, async (req, [id]) => store.saveSample(await readJson(req), Number(id))],
   ['DELETE', /^\/api\/samples\/(\d+)$/, async (req, [id]) => store.deleteSample(Number(id), await readJson(req))],
   ['GET', /^\/api\/samples\/(\d+)\/history$/, (req, [id]) => store.listHistory(Number(id))],
+  ['GET', /^\/api\/deleted-samples$/, () => store.listDeletedSamples()],
   ['GET', /^\/api\/extra-labels$/, () => store.listExtraLabels()],
 ];
 
@@ -100,12 +98,8 @@ async function handleApi(req, res, url) {
     if (m && req.method === method) {
       const out = await fn(req, m.slice(1), url.searchParams);
       if (out instanceof Csv) {
-        res.writeHead(200, {
-          'Content-Type': 'text/csv; charset=utf-8',
-          'Content-Disposition': `attachment; filename="${out.filename}"`,
-          'Cache-Control': 'no-store',
-        });
-        return res.end(out.body);
+        return send(res, 200, out.body, 'text/csv; charset=utf-8',
+          { 'Content-Disposition': `attachment; filename="${out.filename}"` });
       }
       return send(res, 200, out);
     }
@@ -122,21 +116,27 @@ async function serveStatic(req, res, path) {
     throw new HttpError(400, 'Bad Request');
   }
   const file = normalize(join(PUBLIC_DIR, rel));
-  // public/ の外（../ など）は読ませない
-  if (!file.startsWith(PUBLIC_DIR + sep)) throw new HttpError(404, 'Not Found');
+  const type = MIME[extname(file).toLowerCase()];
+  // public/ の外（../ など）と、配信対象でない種類のファイルは読ませない
+  if (!file.startsWith(PUBLIC_DIR + sep) || !type) throw new HttpError(404, 'Not Found');
   let data;
   try {
     data = await readFile(file);
   } catch {
     throw new HttpError(404, 'Not Found');
   }
-  send(res, 200, data, MIME[extname(file).toLowerCase()] || 'application/octet-stream');
+  send(res, 200, data, type);
 }
 
 const server = createServer(async (req, res) => {
-  const url = new URL(req.url, 'http://x');
   try {
-    checkRequest(req, url);
+    let url;
+    try {
+      url = new URL(req.url, 'http://x');
+    } catch {
+      throw new HttpError(400, 'Bad Request');
+    }
+    guard(req, url);
     if (url.pathname.startsWith('/api/')) await handleApi(req, res, url);
     else await serveStatic(req, res, url.pathname);
   } catch (e) {
@@ -145,6 +145,9 @@ const server = createServer(async (req, res) => {
     send(res, 500, { error: 'サーバー内部でエラーが発生しました' });
   }
 });
+
+// 想定外の例外でサーバーごと落ちないようにする（記録だけ残して動き続ける）
+process.on('unhandledRejection', e => console.error(e));
 
 server.on('error', e => {
   if (e.code === 'EADDRINUSE') {
@@ -155,7 +158,8 @@ server.on('error', e => {
   process.exit(1);
 });
 
-// 終了時に WAL を本体へ書き戻して DB を閉じる（Ctrl+C / ウィンドウを閉じる / タスク終了）
+// 終了時に WAL を本体へ書き戻して DB を閉じる（Ctrl+C / ウィンドウを閉じる）。
+// タスクマネージャーなどでの強制終了では呼ばれないが、その場合も次に起動したときに WAL から復元される
 let closing = false;
 function shutdown() {
   if (closing) return;
