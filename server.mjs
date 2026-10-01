@@ -1,9 +1,9 @@
 import { createServer } from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { join, normalize, extname, sep } from 'node:path';
-import { hostname } from 'node:os';
+import { hostname, networkInterfaces } from 'node:os';
 import { exec } from 'node:child_process';
-import { PORT, HOST, PUBLIC_DIR, BARREL_ZONES } from './config.mjs';
+import { PORT, HOST, PUBLIC_DIR, BARREL_ZONES, EXTRA_HOSTS } from './config.mjs';
 import * as store from './db.mjs';
 
 const { HttpError } = store;
@@ -31,10 +31,42 @@ async function readJson(req) {
     if (size > 1_000_000) throw new HttpError(413, 'リクエストが大きすぎます');
     chunks.push(c);
   }
+  let body;
   try {
-    return JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}');
+    body = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}');
   } catch {
     throw new HttpError(400, 'JSON の形式が不正です');
+  }
+  if (body === null || typeof body !== 'object' || Array.isArray(body)) throw new HttpError(400, 'JSON の形式が不正です');
+  return body;
+}
+
+/* ---------- 外部サイトからの書き込み・読み出しを防ぐ ----------
+ * 認証が無いので、社員が開いた外部の Web ページからこのサーバーへ送られる要求を拒否する。
+ * - Host 検証: DNS rebinding（外部ドメインをこのPCのアドレスに向ける手口）対策
+ * - Origin 検証と Content-Type: application/json の強制: CSRF（フォームや no-cors fetch からの POST）対策 */
+const allowedHosts = new Set([
+  'localhost', '127.0.0.1', '[::1]', hostname().toLowerCase(),
+  ...Object.values(networkInterfaces()).flat()
+    .map(i => (i.family === 'IPv6' ? `[${i.address.split('%')[0]}]` : i.address).toLowerCase()),
+  ...EXTRA_HOSTS.map(h => h.toLowerCase()),
+]);
+const stripPort = h => h.toLowerCase().replace(/:\d+$/, '');
+
+function checkRequest(req, url) {
+  const host = req.headers.host ?? '';
+  if (!allowedHosts.has(stripPort(host))) {
+    throw new HttpError(403, `このアドレス（${host}）からは利用できません。config.mjs の EXTRA_HOSTS を確認してください`);
+  }
+  if (!url.pathname.startsWith('/api/') || req.method === 'GET' || req.method === 'HEAD') return;
+  const origin = req.headers.origin;
+  if (origin !== undefined) {
+    let originHost = '';
+    try { originHost = new URL(origin).host.toLowerCase(); } catch { /* 'null' など */ }
+    if (originHost !== host.toLowerCase()) throw new HttpError(403, '他のサイトからの要求は受け付けません');
+  }
+  if (!/^application\/json\b/i.test(req.headers['content-type'] ?? '')) {
+    throw new HttpError(415, 'Content-Type は application/json にしてください');
   }
 }
 
@@ -57,7 +89,8 @@ const routes = [
   ['GET', /^\/api\/samples\/(\d+)$/, (req, [id]) => store.getSample(Number(id))],
   ['POST', /^\/api\/samples$/, async req => store.saveSample(await readJson(req))],
   ['PUT', /^\/api\/samples\/(\d+)$/, async (req, [id]) => store.saveSample(await readJson(req), Number(id))],
-  ['DELETE', /^\/api\/samples\/(\d+)$/, (req, [id]) => store.deleteSample(Number(id))],
+  ['DELETE', /^\/api\/samples\/(\d+)$/, async (req, [id]) => store.deleteSample(Number(id), await readJson(req))],
+  ['GET', /^\/api\/samples\/(\d+)\/history$/, (req, [id]) => store.listHistory(Number(id))],
   ['GET', /^\/api\/extra-labels$/, () => store.listExtraLabels()],
 ];
 
@@ -82,7 +115,12 @@ async function handleApi(req, res, url) {
 
 async function serveStatic(req, res, path) {
   if (req.method !== 'GET' && req.method !== 'HEAD') throw new HttpError(405, 'Method Not Allowed');
-  const rel = path === '/' ? 'index.html' : decodeURIComponent(path).replace(/^\/+/, '');
+  let rel;
+  try {
+    rel = path === '/' ? 'index.html' : decodeURIComponent(path).replace(/^\/+/, '');
+  } catch {
+    throw new HttpError(400, 'Bad Request');
+  }
   const file = normalize(join(PUBLIC_DIR, rel));
   // public/ の外（../ など）は読ませない
   if (!file.startsWith(PUBLIC_DIR + sep)) throw new HttpError(404, 'Not Found');
@@ -98,10 +136,11 @@ async function serveStatic(req, res, path) {
 const server = createServer(async (req, res) => {
   const url = new URL(req.url, 'http://x');
   try {
+    checkRequest(req, url);
     if (url.pathname.startsWith('/api/')) await handleApi(req, res, url);
     else await serveStatic(req, res, url.pathname);
   } catch (e) {
-    if (e instanceof HttpError) return send(res, e.status, { error: e.message });
+    if (e instanceof HttpError) return send(res, e.status, { error: e.message, code: e.code });
     console.error(e);
     send(res, 500, { error: 'サーバー内部でエラーが発生しました' });
   }
@@ -115,6 +154,17 @@ server.on('error', e => {
   }
   process.exit(1);
 });
+
+// 終了時に WAL を本体へ書き戻して DB を閉じる（Ctrl+C / ウィンドウを閉じる / タスク終了）
+let closing = false;
+function shutdown() {
+  if (closing) return;
+  closing = true;
+  server.close();
+  try { store.closeDb(); } catch (e) { console.error(e); }
+  process.exit(0);
+}
+for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGBREAK']) process.on(sig, shutdown);
 
 server.listen(PORT, HOST, () => {
   const local = `http://localhost:${PORT}`;

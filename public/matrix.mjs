@@ -40,6 +40,7 @@ export function sampleEntries(s, zones) {
   for (const w of act.rows) {
     if (w.row_type === 'base') {
       add('weigh', 'base', 'ベース樹脂', '', w.material_name);
+      add('weigh', 'base:lot', 'ベース樹脂 ロット', '', w.lot);
       add('weigh', 'base:actual', 'ベース樹脂 実秤量', 'g', fixed(w.actual_g, 2));
       continue;
     }
@@ -47,6 +48,7 @@ export function sampleEntries(s, zones) {
     const n = w.material_name;
     add('weigh', `${k}:target`, `${n} 狙い濃度`, 'wt%', w.target_active_pct);
     add('weigh', `${k}:active`, `${n} 有効成分`, '%', w.active_pct_snapshot);
+    add('weigh', `${k}:lot`, `${n} ロット`, '', w.lot);
     add('weigh', `${k}:actual`, `${n} 実秤量`, 'g', fixed(w.actual_g, 2));
     add('weigh', `${k}:real`, `${n} 実濃度`, 'wt%', entered ? fixed(w.real_pct, 3) : '');
   }
@@ -58,17 +60,23 @@ export function sampleEntries(s, zones) {
   add('cond', 'die_temp_c', 'ダイ温度', '℃', s.die_temp_c);
   for (const f of COND_FIELDS) add('cond', f.key, f.label, f.unit, s[f.key]);
 
-  for (const e of s.extras.filter(e => e.category === 'condition')) {
-    add('condExtra', `cond:${e.label}`, e.label, e.unit, e.value);
-  }
+  // 同じ項目名が複数ある（測定値の n=2 など）ときは 2つ目以降を「MFR (2)」として別の行にする
+  const addExtras = (category, group, prefix) => {
+    const seen = new Map();
+    for (const e of s.extras.filter(e => e.category === category)) {
+      const n = (seen.get(e.label) ?? 0) + 1;
+      seen.set(e.label, n);
+      const suffix = n > 1 ? ` (${n})` : '';
+      add(group, `${prefix}:${e.label}#${n}`, e.label + suffix, e.unit, e.value);
+    }
+  };
+  addExtras('condition', 'condExtra', 'cond');
 
   add('eval', 'judgement', '総合判定', '', JUDGEMENTS[s.judgement] ?? '');
   add('eval', 'appearance_note', '外観・所見', '', s.appearance_note);
   add('eval', 'memo', 'メモ', '', s.memo);
 
-  for (const e of s.extras.filter(e => e.category === 'measurement')) {
-    add('measurement', `meas:${e.label}`, e.label, e.unit, e.value);
-  }
+  addExtras('measurement', 'measurement', 'meas');
   return out;
 }
 

@@ -1,6 +1,9 @@
 // 画面1: 配合
 import { calcCharge } from './calc.mjs';
-import { $, esc, fmt, toNum, alertBox, api, toast, state, matById, reloadMasters, registerDirty, showTab } from './common.js';
+import {
+  $, esc, fmt, toNum, alertBox, api, toast, state, matById, recipeById, reloadMasters, registerDirty, showTab,
+  showAlertWithAction,
+} from './common.js';
 import { newSampleFor } from './sample.js';
 
 let draft = null;   // 編集中の配合（保存前のコピー）
@@ -22,13 +25,13 @@ function confirmDiscard() {
 
 function blankDraft() {
   return { id: null, code: '', name: '', base_material_id: resins()[0]?.id ?? null,
-    default_qty_g: 1000, memo: '', items: [], version: null };
+    default_qty_g: 1000, memo: '', items: [], version: null, sample_count: 0 };
 }
 
 function toDraft(r) {
   return {
     id: r.id, code: r.code, name: r.name, base_material_id: r.base_material_id,
-    default_qty_g: r.default_qty_g, memo: r.memo ?? '', version: r.version,
+    default_qty_g: r.default_qty_g, memo: r.memo ?? '', version: r.version, sample_count: r.sample_count,
     items: r.items.map(i => ({ material_id: i.material_id, target_active_pct: i.target_active_pct })),
   };
 }
@@ -41,11 +44,11 @@ function drawRecipeList() {
     return;
   }
   box.innerHTML = state.recipes.map(r => `
-    <div class="list-item ${r.id === draft?.id ? 'on' : ''}" data-id="${r.id}">
+    <button type="button" class="list-item ${r.id === draft?.id ? 'on' : ''}" data-id="${r.id}" ${r.id === draft?.id ? 'aria-current="true"' : ''}>
       <span class="code">${esc(r.code)}</span>
       <span class="nm">${esc(r.name)}</span>
-      <span class="meta">添加剤 ${r.items.length} 種 / 基準 ${Number(r.default_qty_g).toLocaleString()} g</span>
-    </div>`).join('');
+      <span class="meta">添加剤 ${r.items.length} 種 / 基準 ${Number(r.default_qty_g).toLocaleString()} g / サンプル ${r.sample_count} 件</span>
+    </button>`).join('');
   box.querySelectorAll('.list-item').forEach(el => el.onclick = () => {
     const r = state.recipes.find(x => x.id === Number(el.dataset.id));
     if (r.id === draft?.id || !confirmDiscard()) return;
@@ -57,15 +60,22 @@ function drawRecipeList() {
 function openDraft(d) {
   draft = d;
   setDirty(false);
+  $('#rSaveAlert').innerHTML = '';
   drawRecipeList();
   drawForm();
 }
+
+// サンプルが付いた配合は組成を変えられない（サーバー側でも拒否する）。名前・コード・作成量・メモは変えられる
+const locked = () => draft.id !== null && draft.sample_count > 0;
 
 function drawForm() {
   $('#rCode').value = draft.code;
   $('#rName').value = draft.name;
   $('#rQty').value = draft.default_qty_g ?? '';
   $('#rMemo').value = draft.memo;
+  $('#rLockNote').innerHTML = locked()
+    ? `<div class="note" style="margin-top:0; margin-bottom:12px">この配合にはサンプルが ${draft.sample_count} 件あるため、組成（ベース樹脂・添加剤・狙い濃度）は変更できません。組成を変える場合は「複製」で新しい配合を作ってください。</div>`
+    : '';
   drawBaseSelect();
   drawItems();
 }
@@ -76,19 +86,22 @@ function drawBaseSelect() {
     ? list.map(m => `<option value="${m.id}" ${m.id === draft.base_material_id ? 'selected' : ''}>${esc(m.name)}</option>`).join('')
     : '<option value="">（樹脂を原料マスタに登録してください）</option>';
   if (list.length && !list.some(m => m.id === draft.base_material_id)) draft.base_material_id = list[0].id;
+  $('#rBase').disabled = locked();
 }
 
 function drawItems() {
   const adds = additives();
   const opts = sel => adds.map(m =>
     `<option value="${m.id}" ${m.id === sel ? 'selected' : ''}>${esc(m.name)}</option>`).join('');
+  const dis = locked() ? 'disabled' : '';
+  $('#addItem').disabled = locked();
   $('#rItems').innerHTML = draft.items.length ? draft.items.map((it, i) => `
     <tr>
-      <td><select style="width:100%" data-i="${i}" class="itMat">${opts(it.material_id)}</select></td>
+      <td><select style="width:100%" data-i="${i}" class="itMat" aria-label="添加剤 ${i + 1} の原料" ${dis}>${opts(it.material_id)}</select></td>
       <td class="num" data-active="${i}"></td>
-      <td class="num"><input type="number" step="any" min="0" style="width:100%" value="${it.target_active_pct ?? ''}" data-i="${i}" class="itPct"></td>
+      <td class="num"><input type="number" step="any" min="0" style="width:100%" value="${it.target_active_pct ?? ''}" data-i="${i}" class="itPct" aria-label="添加剤 ${i + 1} の狙い濃度 wt%" ${dis}></td>
       <td class="num" data-g="${i}"></td>
-      <td><button class="del" data-i="${i}">削除</button></td>
+      <td><button class="del" data-i="${i}" aria-label="添加剤 ${i + 1} を削除" ${dis}>削除</button></td>
     </tr>`).join('')
     : `<tr><td colspan="5" class="hint">添加剤がありません。「＋ 添加剤を追加」で行を足してください。</td></tr>`;
 
@@ -156,15 +169,25 @@ $('#newRecipe').onclick = () => {
 
 $('#duplicate').onclick = () => {
   if (!confirmDiscard()) return;
-  const copy = { ...structuredClone(draft), id: null, version: null, code: '', name: `${draft.name}（複製）` };
+  const copy = { ...structuredClone(draft), id: null, version: null, sample_count: 0, code: '', name: `${draft.name}（複製）` };
   openDraft(copy);
   setDirty(true);
   $('#rCode').focus();
 };
 
+// 他の人が先に保存したとき: 自分の変更を捨てて最新を読み直す
+async function reloadCurrent() {
+  const id = draft.id;
+  await reloadMasters();
+  const r = recipeById(id);
+  if (r) openDraft(toDraft(r));
+  toast('最新の内容を読み直しました');
+}
+
 $('#save').onclick = async () => {
   const btn = $('#save');
   btn.disabled = true;
+  $('#rSaveAlert').innerHTML = '';
   try {
     const saved = draft.id === null
       ? await api('POST', '/api/recipes', draft)
@@ -173,7 +196,11 @@ $('#save').onclick = async () => {
     openDraft(toDraft(saved));
     toast('保存しました');
   } catch (e) {
-    $('#rAlert').innerHTML = alertBox(e.message);
+    if (e.code === 'stale') {
+      showAlertWithAction($('#rSaveAlert'), e.message, '最新を読み直す（自分の変更は破棄）', reloadCurrent);
+    } else {
+      $('#rSaveAlert').innerHTML = alertBox(e.message);
+    }
   } finally {
     btn.disabled = false;
     calcRecipe();
@@ -196,9 +223,16 @@ $('#addMat').onclick = () => {
   $('#mName').focus();
 };
 
+$('#mCancel').onclick = () => $('#matDlg').close();
+
 $('#matForm').onsubmit = async e => {
-  if (e.submitter?.value !== 'save') return;
   e.preventDefault();
+  // 既製MBを純品のまま登録すると仕込み量が狂う（このアプリが防ぎたい事故）ので、添加剤の 100% は確かめる
+  if ($('#mKind').value === 'additive' && Number($('#mActive').value) === 100 &&
+      !confirm('有効成分 100%（純品）として登録します。\n既製マスターバッチ（例: 有効成分 50%）ではありませんか？')) {
+    $('#mActive').focus();
+    return;
+  }
   try {
     const m = await api('POST', '/api/materials', {
       name: $('#mName').value, kind: $('#mKind').value, active_pct: $('#mActive').value,

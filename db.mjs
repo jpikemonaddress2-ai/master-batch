@@ -7,7 +7,8 @@ import { COND_FIELDS, JUDGEMENTS } from './public/fields.mjs';
 import { toCsv } from './public/matrix.mjs';
 
 export class HttpError extends Error {
-  constructor(status, message) { super(message); this.status = status; }
+  // code: 画面側で回復手段を出し分けるための識別子（例: 'stale' = 他の人が先に保存した）
+  constructor(status, message, code = null) { super(message); this.status = status; this.code = code; }
 }
 
 mkdirSync(dirname(DB_PATH), { recursive: true });
@@ -20,7 +21,25 @@ db.exec(`
   PRAGMA busy_timeout = 5000;
 `);
 
-db.exec(`
+function tx(fn) {
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    const result = fn();
+    db.exec('COMMIT');
+    return result;
+  } catch (e) {
+    if (db.isTransaction) db.exec('ROLLBACK');
+    throw e;
+  }
+}
+
+// ---------- スキーマ ----------
+// 版ごとの変更を順に流す。適用済みの版は PRAGMA user_version に記録する。
+// 既存の版は書き換えず、変更は必ず末尾に新しい版として足すこと
+// （fields.mjs の COND_FIELDS に項目を足すときも、ここで ALTER TABLE を足す）。
+const MIGRATIONS = [
+  // 1: 初期スキーマ
+  `
 CREATE TABLE IF NOT EXISTS materials (
   id         INTEGER PRIMARY KEY,
   name       TEXT NOT NULL UNIQUE,
@@ -99,18 +118,42 @@ CREATE TABLE IF NOT EXISTS sample_extras (
 
 CREATE INDEX IF NOT EXISTS idx_recipe_items_recipe ON recipe_items(recipe_id);
 CREATE INDEX IF NOT EXISTS idx_samples_recipe      ON samples(recipe_id);
-`);
+`,
+  // 2: 子テーブルの索引、原料ロット、サンプルの変更履歴
+  `
+CREATE INDEX IF NOT EXISTS idx_weighings_sample ON sample_weighings(sample_id);
+CREATE INDEX IF NOT EXISTS idx_extras_sample    ON sample_extras(sample_id);
+ALTER TABLE sample_weighings ADD COLUMN lot TEXT;
 
-function tx(fn) {
-  db.exec('BEGIN IMMEDIATE');
-  try {
-    const result = fn();
-    db.exec('COMMIT');
-    return result;
-  } catch (e) {
-    db.exec('ROLLBACK');
-    throw e;
+-- 更新・削除の直前のサンプル全体を JSON で残す。サンプルを削除しても履歴は消さない（外部キーなし）
+CREATE TABLE sample_history (
+  id            INTEGER PRIMARY KEY,
+  sample_id     INTEGER NOT NULL,
+  op            TEXT NOT NULL CHECK (op IN ('update', 'delete')),
+  changed_by    TEXT NOT NULL,
+  changed_at    TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+  snapshot_json TEXT NOT NULL
+);
+CREATE INDEX idx_history_sample ON sample_history(sample_id);
+`,
+];
+
+{
+  const { user_version: ver } = db.prepare('PRAGMA user_version').get();
+  for (let v = ver; v < MIGRATIONS.length; v++) {
+    tx(() => {
+      db.exec(MIGRATIONS[v]);
+      db.exec(`PRAGMA user_version = ${v + 1}`);
+    });
   }
+}
+
+// WAL の中身を本体 .db に書き戻してから閉じる。サーバー終了時に呼ぶ
+// （書き戻しておかないと、.db だけをコピーしたバックアップに直近の記録が入らない）
+export function closeDb() {
+  if (!db.isOpen) return;
+  db.exec('PRAGMA wal_checkpoint(TRUNCATE)');
+  db.close();
 }
 
 const str = v => (v ?? '').toString().trim();
@@ -148,14 +191,17 @@ function itemsOf(recipeId) {
   `).all(recipeId);
 }
 
+const RECIPE_SELECT = `
+  SELECT r.*, (SELECT COUNT(*) FROM samples s WHERE s.recipe_id = r.id) AS sample_count FROM recipes r`;
+
 export function getRecipe(id) {
-  const r = db.prepare('SELECT * FROM recipes WHERE id = ?').get(id);
+  const r = db.prepare(`${RECIPE_SELECT} WHERE r.id = ?`).get(id);
   if (!r) throw new HttpError(404, '配合が見つかりません');
   return { ...r, items: itemsOf(id) };
 }
 
 export function listRecipes() {
-  return db.prepare('SELECT * FROM recipes ORDER BY code').all()
+  return db.prepare(`${RECIPE_SELECT} ORDER BY r.code`).all()
     .map(r => ({ ...r, items: itemsOf(r.id) }));
 }
 
@@ -199,10 +245,16 @@ export function saveRecipe(input, id = null) {
         'INSERT INTO recipes (code, name, base_material_id, default_qty_g, memo) VALUES (?, ?, ?, ?, ?)'
       ).run(v.code, v.name, v.base_material_id, v.qty, v.memo).lastInsertRowid);
     } else {
-      const cur = db.prepare('SELECT version FROM recipes WHERE id = ?').get(id);
-      if (!cur) throw new HttpError(404, '配合が見つかりません');
+      const cur = getRecipe(id);
       if (cur.version !== Number(input.version)) {
-        throw new HttpError(409, '他の人がこの配合を先に保存しました。画面を開き直して最新の内容を確認してください');
+        throw new HttpError(409, '他の人がこの配合を先に保存しました。最新の内容を読み直してください', 'stale');
+      }
+      // サンプルが付いた配合の組成を変えると、同じ配合コードの下に組成の違うサンプルが混ざる。
+      // 組成（ベース樹脂・添加剤・狙い濃度）の変更は禁止し、複製で新しい配合を作ってもらう
+      const sig = (base, items) => JSON.stringify([base, items.map(i => [i.material_id, i.target_active_pct])
+        .sort((a, b) => a[0] - b[0])]);
+      if (cur.sample_count > 0 && sig(cur.base_material_id, cur.items) !== sig(v.base_material_id, v.items)) {
+        throw new HttpError(409, `この配合にはサンプルが ${cur.sample_count} 件あるため、組成は変更できません。「複製」で新しい配合を作ってください`);
       }
       db.prepare(`
         UPDATE recipes SET code = ?, name = ?, base_material_id = ?, default_qty_g = ?, memo = ?,
@@ -298,7 +350,6 @@ function validateSample(input) {
   const code = str(input.code);
   if (!code) throw new HttpError(400, 'サンプル番号を入力してください');
   const createdBy = str(input.created_by);
-  if (!createdBy) throw new HttpError(400, '記入者を入力してください');
   const qty = num(input.total_qty_g);
   if (!(qty > 0)) throw new HttpError(400, '作成量は 0 より大きい値を入力してください');
   const madeOn = str(input.made_on) || null;
@@ -311,7 +362,7 @@ function validateSample(input) {
   for (const f of COND_FIELDS) cond[f.key] = optNum(input[f.key], f.label);
 
   const judgement = input.judgement || null;
-  if (judgement !== null && !(judgement in JUDGEMENTS)) throw new HttpError(400, '総合判定が不正です');
+  if (judgement !== null && !Object.hasOwn(JUDGEMENTS, judgement)) throw new HttpError(400, '総合判定が不正です');
 
   const extras = (Array.isArray(input.extras) ? input.extras : []).map(e => {
     const label = str(e.label);
@@ -339,6 +390,10 @@ function validateSample(input) {
  */
 export function saveSample(input, id = null) {
   const v = validateSample(input);
+  // 記入者は作成時に確定し、更新では変えない。更新した人は changed_by として履歴に残す
+  if (id === null && !v.created_by) throw new HttpError(400, '記入者を入力してください');
+  const changedBy = str(input.changed_by);
+  if (id !== null && !changedBy) throw new HttpError(400, '変更者の名前を入力してください');
   return tx(() => {
     const clash = db.prepare('SELECT id FROM samples WHERE code = ? AND id IS NOT ?').get(v.code, id);
     if (clash) throw new HttpError(409, `サンプル番号「${v.code}」は既に使われています`);
@@ -347,17 +402,19 @@ export function saveSample(input, id = null) {
     if (id === null) {
       const r = getRecipe(Number(input.recipe_id));
       if (r.version !== Number(input.recipe_version)) {
-        throw new HttpError(409, 'この配合は画面を開いた後に変更されています。配合を選び直して、狙い量を確認してから保存してください');
+        throw new HttpError(409, 'この配合は画面を開いた後に他の人が変更しました。最新の配合で狙い量を取り直したので、確認してから保存し直してください', 'recipe_changed');
       }
       recipeId = r.id;
       baseId = r.base_material_id;
       basis = r.items;
     } else {
-      const cur = db.prepare('SELECT recipe_id, version FROM samples WHERE id = ?').get(id);
+      const cur = db.prepare('SELECT recipe_id, version, created_by FROM samples WHERE id = ?').get(id);
       if (!cur) throw new HttpError(404, 'サンプルが見つかりません');
       if (cur.version !== Number(input.version)) {
-        throw new HttpError(409, '他の人がこのサンプルを先に保存しました。開き直して最新の内容を確認してください');
+        throw new HttpError(409, '他の人がこのサンプルを先に保存しました。最新の内容を読み直してください', 'stale');
       }
+      recordHistory(id, 'update', changedBy);
+      v.created_by = cur.created_by;
       recipeId = cur.recipe_id;
       const old = weighingsOf(id);
       baseId = old.find(w => w.row_type === 'base').material_id;
@@ -370,11 +427,12 @@ export function saveSample(input, id = null) {
     if (tw.over) throw new HttpError(400, '配合過剰: 添加剤の合計が作成量を超えています');
 
     const actuals = new Map((Array.isArray(input.actuals) ? input.actuals : [])
-      .map(a => [`${a.row_type}:${a.material_id}`, a.actual_g]));
+      .map(a => [`${a.row_type}:${a.material_id}`, a]));
     const rows = tw.rows.map(r => {
-      const actual = optNum(actuals.get(`${r.row_type}:${r.material_id}`), '実秤量');
+      const a = actuals.get(`${r.row_type}:${r.material_id}`) ?? {};
+      const actual = optNum(a.actual_g, '実秤量');
       if (actual !== null && actual < 0) throw new HttpError(400, '実秤量は 0 以上で入力してください');
-      return { ...r, actual_g: actual };
+      return { ...r, actual_g: actual, lot: str(a.lot) || null };
     });
 
     const cols = ['code', 'created_by', 'total_qty_g', 'made_on', 'barrel_temps_json', 'die_temp_c',
@@ -395,11 +453,11 @@ export function saveSample(input, id = null) {
     }
 
     const insW = db.prepare(`
-      INSERT INTO sample_weighings (sample_id, material_id, row_type, target_active_pct, active_pct_snapshot, target_g, actual_g)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO sample_weighings (sample_id, material_id, row_type, target_active_pct, active_pct_snapshot, target_g, actual_g, lot)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     `);
     for (const r of rows) {
-      insW.run(id, r.material_id, r.row_type, r.target_active_pct, r.active_pct_snapshot, r.target_g, r.actual_g);
+      insW.run(id, r.material_id, r.row_type, r.target_active_pct, r.active_pct_snapshot, r.target_g, r.actual_g, r.lot);
     }
     const insE = db.prepare('INSERT INTO sample_extras (sample_id, category, label, value, unit) VALUES (?, ?, ?, ?, ?)');
     for (const e of v.extras) insE.run(id, e.category, e.label, e.value, e.unit);
@@ -408,8 +466,23 @@ export function saveSample(input, id = null) {
   });
 }
 
-export function deleteSample(id) {
-  const { changes } = db.prepare('DELETE FROM samples WHERE id = ?').run(id);
-  if (!changes) throw new HttpError(404, 'サンプルが見つかりません');
-  return { ok: true };
+// 更新・削除の直前の内容を履歴に残す（tx の中で呼ぶ）
+function recordHistory(id, op, changedBy) {
+  db.prepare('INSERT INTO sample_history (sample_id, op, changed_by, snapshot_json) VALUES (?, ?, ?, ?)')
+    .run(id, op, changedBy, JSON.stringify(getSample(id)));
+}
+
+export function deleteSample(id, input) {
+  const changedBy = str(input?.changed_by);
+  if (!changedBy) throw new HttpError(400, '削除する人の名前を入力してください');
+  return tx(() => {
+    recordHistory(id, 'delete', changedBy);
+    db.prepare('DELETE FROM samples WHERE id = ?').run(id);
+    return { ok: true };
+  });
+}
+
+export function listHistory(sampleId) {
+  return db.prepare('SELECT * FROM sample_history WHERE sample_id = ? ORDER BY id DESC').all(sampleId)
+    .map(({ snapshot_json, ...h }) => ({ ...h, snapshot: JSON.parse(snapshot_json) }));
 }

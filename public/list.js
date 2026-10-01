@@ -37,13 +37,18 @@ async function refresh() {
   draw();
 }
 
-function draw() {
+// 件数と「全選択」だけを更新する（表を描き直すとチェック中のフォーカスが失われるため）
+function drawCount() {
   $('#lCount').textContent = `${rows.length} 件表示 / 全 ${total} 件　選択 ${selected.size} 件`;
   $('#chkAll').checked = rows.length > 0 && rows.every(s => selected.has(s.id));
+}
+
+function draw() {
+  drawCount();
   $('#lRows').innerHTML = rows.length ? rows.map(s => `
     <tr data-id="${s.id}" class="clickable">
       <td><input type="checkbox" data-c="${s.id}" ${selected.has(s.id) ? 'checked' : ''} aria-label="${esc(s.code)} を選択"></td>
-      <td style="font-family:var(--mono);color:var(--accent);font-weight:600">${esc(s.code)}</td>
+      <td><button type="button" class="link" data-open="${s.id}" style="font-family:var(--mono);font-weight:600;font-size:12.5px">${esc(s.code)}</button></td>
       <td>${esc(s.made_on ?? '')}</td>
       <td>${esc(s.recipe_code)} <span style="color:var(--sub)">${esc(s.recipe_name)}</span></td>
       <td class="num">${s.total_qty_g?.toLocaleString() ?? ''}</td>
@@ -58,9 +63,9 @@ function draw() {
   $('#lRows').querySelectorAll('input[data-c]').forEach(el => el.onchange = () => {
     const id = Number(el.dataset.c);
     el.checked ? selected.add(id) : selected.delete(id);
-    draw();
+    drawCount();
   });
-  // 行をクリックするとサンプル記録で開く（チェックボックスは除く）
+  // 行（またはサンプル番号のボタン）でサンプル記録を開く。チェックボックスは除く
   $('#lRows').querySelectorAll('tr[data-id]').forEach(tr => tr.onclick = async e => {
     if (e.target.closest('input')) return;
     if (await openSample(Number(tr.dataset.id))) showTab('sample');
@@ -89,7 +94,8 @@ $('#fClear').onclick = () => {
 
 $('#chkAll').onchange = e => {
   rows.forEach(s => e.target.checked ? selected.add(s.id) : selected.delete(s.id));
-  draw();
+  $('#lRows').querySelectorAll('input[data-c]').forEach(el => { el.checked = e.target.checked; });
+  drawCount();
 };
 
 $('#clearSel').onclick = () => {

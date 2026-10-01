@@ -15,8 +15,23 @@ export async function api(method, path, body) {
     body: body ? JSON.stringify(body) : undefined,
   });
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error || `通信エラー (${res.status})`);
+  if (!res.ok) {
+    const err = new Error(data.error || `通信エラー (${res.status})`);
+    err.status = res.status;
+    err.code = data.code ?? null;   // 'stale' = 他の人が先に保存した、など
+    throw err;
+  }
   return data;
+}
+
+/**
+ * エラー表示に回復用のボタンを1つ付けて box に出す。
+ * 「他の人が先に保存しました」のように、読み直す以外に抜け道がないエラーで使う。
+ */
+export function showAlertWithAction(box, msg, label, onClick) {
+  box.innerHTML = `<div class="alert">${esc(msg)}
+    <button type="button" class="btn" style="margin-left:10px">${esc(label)}</button></div>`;
+  box.querySelector('button').onclick = onClick;
 }
 
 export function toast(msg) {
@@ -56,6 +71,16 @@ export function rememberedAuthor() {
 }
 export function rememberAuthor(name) {
   try { localStorage.setItem('mb.author', name); } catch { /* 保存できなくても動作に支障なし */ }
+}
+
+/** 変更履歴に残す名前。覚えていなければ尋ねる。断られたら null */
+export function askEditor() {
+  let name = rememberedAuthor();
+  if (!name) {
+    name = (prompt('あなたの名前を入力してください（変更履歴に残します）') ?? '').trim();
+    if (name) rememberAuthor(name);
+  }
+  return name || null;
 }
 
 export const today = () => new Date().toLocaleDateString('sv-SE');

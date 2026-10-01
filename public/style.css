@@ -153,3 +153,8 @@ a.btn:hover{background:#f2f5f9}
 tr.clickable{cursor:pointer}
 .wrapper{overflow-x:auto}
 .cmp td{white-space:normal; min-width:110px}
+button.list-item{display:block; width:100%; text-align:left; background:none; border:0; border-bottom:1px solid var(--line); font:inherit; color:inherit}
+button.list-item:focus-visible,button.link:focus-visible{outline:2px solid var(--accent); outline-offset:-2px}
+dialog.wide{width:min(900px, calc(100vw - 32px))}
+.history{margin-top:16px}
+.history li{margin:3px 0}

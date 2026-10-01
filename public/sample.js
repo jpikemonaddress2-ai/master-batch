@@ -1,9 +1,10 @@
 // 画面2: サンプル記録
 import { targetWeighings, calcActual } from './calc.mjs';
 import { COND_FIELDS, JUDGEMENTS } from './fields.mjs';
+import { buildMatrix } from './matrix.mjs';
 import {
-  $, esc, fmt, toNum, alertBox, api, toast, state, matById, recipeById,
-  registerDirty, rememberedAuthor, rememberAuthor, today,
+  $, esc, fmt, toNum, alertBox, api, toast, state, matById, recipeById, reloadMasters,
+  registerDirty, rememberedAuthor, rememberAuthor, today, askEditor, showAlertWithAction,
 } from './common.js';
 
 let samples = [];      // 左の一覧
@@ -59,7 +60,7 @@ function blankDraft(recipe) {
     barrel_temps: Array(zones()).fill(null), die_temp_c: null,
     ...Object.fromEntries(COND_FIELDS.map(f => [f.key, null])),
     judgement: null, appearance_note: '', memo: '',
-    extras: [], actuals: {}, basis: basisFromRecipe(recipe),
+    extras: [], actuals: {}, lots: {}, basis: basisFromRecipe(recipe),
   };
 }
 
@@ -74,6 +75,8 @@ function fromSample(s) {
     judgement: s.judgement, appearance_note: s.appearance_note ?? '', memo: s.memo ?? '',
     extras: s.extras.map(e => ({ ...e })),
     actuals: Object.fromEntries(s.weighings.map(w => [rowKey(w), w.actual_g])),
+    lots: Object.fromEntries(s.weighings.map(w => [rowKey(w), w.lot ?? ''])),
+    created_at: s.created_at, updated_at: s.updated_at,
     basis: {
       base_material_id: base.material_id,
       items: s.weighings.filter(w => w.row_type === 'additive').map(w => ({
@@ -99,19 +102,22 @@ function drawSampleList() {
     return;
   }
   box.innerHTML = samples.slice(0, 50).map(s => `
-    <div class="list-item ${s.id === draft?.id ? 'on' : ''}" data-id="${s.id}">
+    <button type="button" class="list-item ${s.id === draft?.id ? 'on' : ''}" data-id="${s.id}" ${s.id === draft?.id ? 'aria-current="true"' : ''}>
       <span class="code">${esc(s.code)}</span>
       ${s.judgement ? `<span class="tag ${s.judgement}" style="float:right">${JUDGEMENTS[s.judgement]}</span>` : ''}
       <span class="nm">${esc(s.recipe_code)} ${esc(s.recipe_name)}</span>
       <span class="meta">${esc(s.made_on ?? '')}${s.created_by ? ` / ${esc(s.created_by)}` : ''}</span>
-    </div>`).join('');
+    </button>`).join('');
   box.querySelectorAll('.list-item').forEach(el => el.onclick = () => openSample(Number(el.dataset.id)));
 }
 
-/** 保存済みサンプルを開く。破棄を断られた・読めなかったら false */
-export async function openSample(id) {
-  if (id === draft?.id) return true;
-  if (!confirmDiscard()) return false;
+/**
+ * 保存済みサンプルを開く。破棄を断られた・読めなかったら false。
+ * force: 開いている同じサンプルも、未保存の変更を確かめずに読み直す（他の人が先に保存したとき）
+ */
+export async function openSample(id, { force = false } = {}) {
+  if (!force && id === draft?.id) return true;
+  if (!force && !confirmDiscard()) return false;
   try {
     openDraft(fromSample(await api('GET', `/api/samples/${id}`)));
     return true;
@@ -160,10 +166,49 @@ function drawForm() {
   $('#sNote').value = draft.appearance_note;
   $('#sMemo').value = draft.memo;
   $('#sDelete').hidden = draft.id === null;
+  // 記入者は作成時に確定する。後から直した人は変更履歴に残る
+  $('#sBy').disabled = draft.id !== null;
+  $('#sMeta').textContent = draft.id === null ? '新規サンプル'
+    : `作成 ${draft.created_at}（${draft.created_by}）／ 最終更新 ${draft.updated_at}`;
   drawWeigh();
   drawExtras('condition');
   drawExtras('measurement');
+  drawHistory();
 }
+
+/* ---------- 変更履歴 ---------- */
+async function drawHistory() {
+  const box = $('#sHistory');
+  box.innerHTML = '';
+  if (draft.id === null) return;
+  const id = draft.id;
+  let hist;
+  try {
+    hist = await api('GET', `/api/samples/${id}/history`);
+  } catch {
+    return;
+  }
+  if (draft.id !== id || !hist.length) return;
+  box.innerHTML = `<div class="sub-h history">変更履歴（${hist.length} 件）</div><ul class="history" style="margin:0; padding-left:18px">${
+    hist.map((h, i) => `<li>${esc(h.changed_at)} ${esc(h.changed_by)} が変更
+      <button type="button" class="link" data-h="${i}">変更前との差分</button></li>`).join('')}</ul>`;
+  box.querySelectorAll('button[data-h]').forEach(b => b.onclick = async () => {
+    const h = hist[Number(b.dataset.h)];
+    const cur = await api('GET', `/api/samples/${id}`);
+    showHistoryDiff(h, cur);
+  });
+}
+
+function showHistoryDiff(h, cur) {
+  const rows = buildMatrix([h.snapshot, cur], zones()).filter(r => r.diff);
+  $('#histTitle').textContent = `${h.changed_at} ${h.changed_by} による変更（変更前 → 現在）`;
+  $('#histRows').innerHTML = rows.length
+    ? '<tr class="grp"><td>項目</td><td>変更前</td><td>現在</td></tr>' + rows.map(r => `<tr class="diff">
+        <td>${esc(r.label)}${r.unit ? ` (${esc(r.unit)})` : ''}</td>${r.cells.map(v => `<td>${v === '' ? '—' : esc(v)}</td>`).join('')}</tr>`).join('')
+    : '<tr><td class="empty">表示できる差分はありません（更新日時などのみ）。</td></tr>';
+  $('#histDlg').showModal();
+}
+$('#histClose').onclick = () => $('#histDlg').close();
 
 /* ---------- 秤量 ---------- */
 function currentRows() {
@@ -174,30 +219,37 @@ function currentRows() {
 
 function drawWeigh() {
   if (!draft.basis) {
-    $('#sWeigh').innerHTML = '<tr><td colspan="7" class="hint">配合を選ぶと狙い量が並びます。</td></tr>';
+    $('#sWeigh').innerHTML = '<tr><td colspan="8" class="hint">配合を選ぶと狙い量が並びます。</td></tr>';
     $('#sSummary').innerHTML = '';
     $('#sSave').disabled = $('#sSaveNext').disabled = true;
     return;
   }
   const { rows } = currentRows();
   $('#sWeigh').innerHTML = rows.map((r, i) => {
-    const actual = `<input type="number" step="any" min="0" style="width:100%" data-key="${rowKey(r)}" value="${r.actual_g ?? ''}">`;
+    const name = r.row_type === 'base' ? (matById(r.material_id)?.name ?? '（不明な原料）') : draft.basis.items[i].name;
+    const key = rowKey(r);
+    const lot = `<input style="width:100%" data-lot="${key}" value="${esc(draft.lots[key] ?? '')}" aria-label="${esc(name)} のロット">`;
+    const actual = `<input type="number" step="any" min="0" style="width:100%" data-key="${key}" value="${r.actual_g ?? ''}" aria-label="${esc(name)} の実秤量 g">`;
     if (r.row_type === 'base') {
       return `<tr>
-        <td>${esc(matById(r.material_id)?.name ?? '（不明な原料）')} <span style="color:var(--sub);font-size:11px">（ベース樹脂・差引）</span></td>
+        <td>${esc(name)} <span style="color:var(--sub);font-size:11px">（ベース樹脂・差引）</span></td>
         <td class="num">—</td><td class="num">—</td>
-        <td class="num" data-target="${i}"></td><td class="num">${actual}</td>
+        <td class="num" data-target="${i}"></td><td>${lot}</td><td class="num">${actual}</td>
         <td class="num">—</td><td class="num">—</td></tr>`;
     }
     return `<tr>
-      <td>${esc(draft.basis.items[i].name)}</td>
+      <td>${esc(name)}</td>
       <td class="num">${fmt(r.target_active_pct, 2)}</td><td class="num">${fmt(r.active_pct_snapshot, 0)}</td>
-      <td class="num" data-target="${i}"></td><td class="num">${actual}</td>
+      <td class="num" data-target="${i}"></td><td>${lot}</td><td class="num">${actual}</td>
       <td class="num"><b data-real="${i}"></b></td><td class="num delta" data-delta="${i}"></td></tr>`;
   }).join('');
   $('#sWeigh').querySelectorAll('input[data-key]').forEach(el => el.oninput = () => {
     draft.actuals[el.dataset.key] = toNum(el.value);
     setDirty(true); calcSample();
+  });
+  $('#sWeigh').querySelectorAll('input[data-lot]').forEach(el => el.oninput = () => {
+    draft.lots[el.dataset.lot] = el.value;
+    setDirty(true);
   });
   calcSample();
 }
@@ -269,26 +321,52 @@ function addExtra(cat) {
 }
 
 /* ---------- 保存・削除 ---------- */
-async function save() {
+async function save(changedBy) {
   const { rows } = currentRows();
   const body = {
     ...draft,
-    basis: undefined,
+    basis: undefined, lots: undefined,
+    changed_by: changedBy,
     extras: draft.extras.filter(e => e.label.trim() || e.value.trim() || e.unit.trim()),
-    actuals: rows.map(r => ({ material_id: r.material_id, row_type: r.row_type, actual_g: r.actual_g })),
+    actuals: rows.map(r => ({
+      material_id: r.material_id, row_type: r.row_type, actual_g: r.actual_g, lot: draft.lots[rowKey(r)] ?? '',
+    })),
   };
   const saved = draft.id === null
     ? await api('POST', '/api/samples', body)
     : await api('PUT', `/api/samples/${draft.id}`, body);
-  rememberAuthor(saved.created_by ?? '');
+  if (draft.id === null) rememberAuthor(saved.created_by ?? '');
   await reloadSamples();
   return saved;
 }
 
+// 保存が競合したときの回復。入力中の内容をできるだけ残す
+async function recoverFromConflict(e) {
+  if (e.code === 'recipe_changed') {
+    // 他の人が配合を変えた: 最新の配合で狙い量を取り直す（実秤量・ロットは残す）
+    await reloadMasters();
+    const r = recipeById(draft.recipe_id);
+    if (r) Object.assign(draft, { recipe_version: r.version, basis: basisFromRecipe(r) });
+    drawWeigh();
+    $('#sAlert').innerHTML = alertBox(e.message);
+  } else if (e.code === 'stale') {
+    showAlertWithAction($('#sAlert'), e.message, '最新を読み直す（自分の変更は破棄）',
+      () => openSample(draft.id, { force: true }));
+  } else {
+    $('#sAlert').innerHTML = alertBox(e.message);
+  }
+}
+
 async function runSave(next) {
+  let changedBy = null;
+  if (draft.id !== null) {
+    changedBy = askEditor();
+    if (!changedBy) return;
+  }
   $('#sSave').disabled = $('#sSaveNext').disabled = true;
+  $('#sAlert').innerHTML = '';
   try {
-    const saved = await save();
+    const saved = await save(changedBy);
     if (next) {
       // 同じ配合で条件を振る実験が多いので、配合・日付・量・記入者・造粒条件を引き継ぐ
       const d = blankDraft(recipeById(saved.recipe_id));
@@ -307,7 +385,7 @@ async function runSave(next) {
       toast('保存しました');
     }
   } catch (e) {
-    $('#sAlert').innerHTML = alertBox(e.message);
+    await recoverFromConflict(e);
     calcSample();
   }
 }
@@ -316,10 +394,12 @@ $('#sSave').onclick = () => runSave(false);
 $('#sSaveNext').onclick = () => runSave(true);
 
 $('#sDelete').onclick = async () => {
-  if (!confirm(`サンプル「${draft.code}」を削除します。元に戻せません。よろしいですか？`)) return;
+  if (!confirm(`サンプル「${draft.code}」を削除します。一覧からは消えます（削除前の内容は変更履歴に残ります）。よろしいですか？`)) return;
+  const changedBy = askEditor();
+  if (!changedBy) return;
   try {
     const recipe = recipeById(draft.recipe_id);
-    await api('DELETE', `/api/samples/${draft.id}`);
+    await api('DELETE', `/api/samples/${draft.id}`, { changed_by: changedBy });
     await reloadSamples();
     openDraft(blankDraft(recipe ?? state.recipes[0]));
     toast('削除しました');
@@ -346,10 +426,16 @@ function bind(sel, key, conv = v => v, after) {
 }
 
 $('#sRecipe').onchange = e => {
+  const entered = Object.values(draft.actuals).some(v => Number.isFinite(v)) ||
+    Object.values(draft.lots).some(v => v);
+  if (entered && !confirm('配合を変えると、入力済みの実秤量とロットがクリアされます。よろしいですか？')) {
+    e.target.value = draft.recipe_id;
+    return;
+  }
   const r = recipeById(Number(e.target.value));
   Object.assign(draft, {
     recipe_id: r.id, recipe_version: r.version, total_qty_g: r.default_qty_g,
-    basis: basisFromRecipe(r), actuals: {},
+    basis: basisFromRecipe(r), actuals: {}, lots: {},
   });
   $('#sQty').value = r.default_qty_g;
   setDirty(true);
@@ -360,7 +446,7 @@ $('#sRecipe').onchange = e => {
 document.addEventListener('masters-changed', () => {
   if (!draft) return;
   if (draft.id === null) {
-    const r = recipeById(draft.recipe_id) ?? (dirty ? null : state.recipes[0]);
+    const r = recipeById(draft.recipe_id) ?? (draft.recipe_id === null || !dirty ? state.recipes[0] : null);
     if (r) Object.assign(draft, { recipe_id: r.id, recipe_version: r.version, basis: basisFromRecipe(r) });
     drawRecipeSelect();
     drawWeigh();
