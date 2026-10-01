@@ -14,7 +14,7 @@
 
 <nav>
   <button data-tab="recipe" class="on">配合</button>
-  <button data-tab="sample" disabled title="Step 2 で実装予定">サンプル記録</button>
+  <button data-tab="sample">サンプル記録</button>
   <button data-tab="list" disabled title="Step 3 で実装予定">サンプル一覧</button>
   <button data-tab="compare" disabled title="Step 3 で実装予定">比較</button>
 </nav>
@@ -70,11 +70,94 @@
 
         <div class="actions">
           <button class="btn primary" id="save">保存</button>
+          <button class="btn" id="toSample">この配合でサンプルを作る</button>
           <button class="btn" id="duplicate" style="margin-left:auto">複製</button>
         </div>
       </div>
     </div>
   </div>
+</section>
+
+<section id="tab-sample" hidden>
+  <div class="cols">
+    <div class="panel">
+      <h2>最近のサンプル</h2>
+      <div id="sampleList"></div>
+      <div style="padding:10px 14px"><button class="btn" id="newSample" style="width:100%">＋ 新規サンプル</button></div>
+    </div>
+
+    <div class="panel">
+      <h2>サンプル記録<span class="dirty-mark" id="sDirtyMark" hidden>未保存の変更あり</span></h2>
+      <div class="body">
+        <div class="row">
+          <div class="field"><label for="sRecipe">配合</label><select class="w-xl" id="sRecipe"></select></div>
+          <div class="field"><label for="sCode">サンプル番号</label><input class="w-md" id="sCode" placeholder="例: S-2026-001"></div>
+          <div class="field"><label for="sDate">作成日</label><input type="date" class="w-md" id="sDate"></div>
+          <div class="field"><label for="sQty">作成量 (g)</label><input type="number" class="w-sm" id="sQty" step="any" min="0"></div>
+          <div class="field"><label for="sBy">記入者</label><input class="w-md" id="sBy"></div>
+        </div>
+
+        <div class="sub-h">秤量（狙い量に対して、実際に秤った値を入力。未入力の行は狙い量で計算）</div>
+        <table>
+          <thead><tr>
+            <th>原料</th><th class="num">狙い濃度 wt%</th><th class="num">有効成分 %</th>
+            <th class="num">狙い量 g</th><th class="num" style="width:120px">実秤量 g</th>
+            <th class="num">実濃度 wt%</th><th class="num">狙い比</th>
+          </tr></thead>
+          <tbody id="sWeigh"></tbody>
+        </table>
+        <div class="summary" id="sSummary"></div>
+        <div id="sWeighAlert"></div>
+
+        <div class="sub-h">造粒条件 — バレル温度 (℃)</div>
+        <div class="zones" id="sZones"></div>
+
+        <div class="sub-h">造粒条件 — 運転</div>
+        <div class="row" id="sCond"></div>
+
+        <div class="sub-h">造粒条件 — 自由項目</div>
+        <table style="max-width:720px">
+          <thead><tr><th>項目名</th><th style="width:180px">値</th><th style="width:110px">単位</th><th style="width:50px"></th></tr></thead>
+          <tbody id="sExtras-condition"></tbody>
+        </table>
+        <div style="margin-top:8px"><button class="link" id="addCond">＋ 項目を追加</button></div>
+
+        <div class="sub-h">評価</div>
+        <div class="field">
+          <label>総合判定</label>
+          <div style="display:flex; gap:14px; padding-top:4px">
+            <label style="font-weight:400;color:var(--ink)"><input type="radio" name="sJudge" value="good"> 良</label>
+            <label style="font-weight:400;color:var(--ink)"><input type="radio" name="sJudge" value="ok"> 可</label>
+            <label style="font-weight:400;color:var(--ink)"><input type="radio" name="sJudge" value="ng"> 不可</label>
+            <label style="font-weight:400;color:var(--sub)"><input type="radio" name="sJudge" value=""> 未評価</label>
+          </div>
+        </div>
+        <div class="field" style="margin-top:12px; max-width:720px">
+          <label for="sNote">外観・所見</label><textarea id="sNote"></textarea>
+        </div>
+
+        <div class="sub-h">測定値（自由項目）</div>
+        <table style="max-width:720px">
+          <thead><tr><th>項目名</th><th style="width:140px">値</th><th style="width:110px">単位</th><th style="width:50px"></th></tr></thead>
+          <tbody id="sExtras-measurement"></tbody>
+        </table>
+        <div style="margin-top:8px"><button class="link" id="addMeas">＋ 項目を追加</button></div>
+
+        <div class="field" style="margin-top:14px; max-width:720px">
+          <label for="sMemo">メモ</label><textarea id="sMemo"></textarea>
+        </div>
+
+        <div id="sAlert"></div>
+        <div class="actions">
+          <button class="btn primary" id="sSave">保存</button>
+          <button class="btn" id="sSaveNext">保存して続けて新規</button>
+          <button class="btn" id="sDelete" style="margin-left:auto">削除</button>
+        </div>
+      </div>
+    </div>
+  </div>
+  <datalist id="dl-condition"></datalist>
+  <datalist id="dl-measurement"></datalist>
 </section>
 
 </main>

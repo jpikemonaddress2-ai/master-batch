@@ -47,6 +47,12 @@ const routes = [
   ['GET', /^\/api\/recipes\/(\d+)$/, (req, [id]) => store.getRecipe(Number(id))],
   ['POST', /^\/api\/recipes$/, async req => store.saveRecipe(await readJson(req))],
   ['PUT', /^\/api\/recipes\/(\d+)$/, async (req, [id]) => store.saveRecipe(await readJson(req), Number(id))],
+  ['GET', /^\/api\/samples$/, () => store.listSamples()],
+  ['GET', /^\/api\/samples\/(\d+)$/, (req, [id]) => store.getSample(Number(id))],
+  ['POST', /^\/api\/samples$/, async req => store.saveSample(await readJson(req))],
+  ['PUT', /^\/api\/samples\/(\d+)$/, async (req, [id]) => store.saveSample(await readJson(req), Number(id))],
+  ['DELETE', /^\/api\/samples\/(\d+)$/, (req, [id]) => store.deleteSample(Number(id))],
+  ['GET', /^\/api\/extra-labels$/, () => store.listExtraLabels()],
 ];
 
 async function handleApi(req, res, path) {

@@ -1,8 +1,9 @@
 import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
-import { DB_PATH } from './config.mjs';
-import { calcCharge } from './public/calc.mjs';
+import { DB_PATH, BARREL_ZONES } from './config.mjs';
+import { calcCharge, targetWeighings } from './public/calc.mjs';
+import { COND_FIELDS, JUDGEMENTS } from './public/fields.mjs';
 
 export class HttpError extends Error {
   constructor(status, message) { super(message); this.status = status; }
@@ -213,4 +214,170 @@ export function saveRecipe(input, id = null) {
     for (const it of v.items) ins.run(id, it.material_id, it.target_active_pct);
     return getRecipe(id);
   });
+}
+
+// ---------- サンプル ----------
+
+// 空欄は null、数値でなければエラー
+function optNum(v, label) {
+  if (v === '' || v === null || v === undefined) return null;
+  const n = Number(v);
+  if (!Number.isFinite(n)) throw new HttpError(400, `${label}: 数値を入力してください`);
+  return n;
+}
+
+function weighingsOf(sampleId) {
+  return db.prepare(`
+    SELECT w.*, m.name AS material_name
+    FROM sample_weighings w JOIN materials m ON m.id = w.material_id
+    WHERE w.sample_id = ? ORDER BY w.id
+  `).all(sampleId);
+}
+
+export function getSample(id) {
+  const s = db.prepare('SELECT * FROM samples WHERE id = ?').get(id);
+  if (!s) throw new HttpError(404, 'サンプルが見つかりません');
+  const { barrel_temps_json, ...rest } = s;
+  return {
+    ...rest,
+    barrel_temps: JSON.parse(barrel_temps_json || '[]'),
+    weighings: weighingsOf(id),
+    extras: db.prepare('SELECT category, label, value, unit FROM sample_extras WHERE sample_id = ? ORDER BY id').all(id),
+  };
+}
+
+export function listSamples() {
+  return db.prepare(`
+    SELECT s.id, s.code, s.made_on, s.judgement, s.created_by, r.code AS recipe_code, r.name AS recipe_name
+    FROM samples s JOIN recipes r ON r.id = s.recipe_id
+    ORDER BY s.made_on DESC, s.id DESC
+  `).all();
+}
+
+// 自由項目で過去に使った項目名。入力候補に出して表記ゆれ（MFR / mfr など）を減らす
+export function listExtraLabels() {
+  return db.prepare(`
+    SELECT category, label, MAX(unit) AS unit, COUNT(*) AS n
+    FROM sample_extras GROUP BY category, label ORDER BY n DESC
+  `).all();
+}
+
+function validateSample(input) {
+  const code = str(input.code);
+  if (!code) throw new HttpError(400, 'サンプル番号を入力してください');
+  const createdBy = str(input.created_by);
+  if (!createdBy) throw new HttpError(400, '記入者を入力してください');
+  const qty = num(input.total_qty_g);
+  if (!(qty > 0)) throw new HttpError(400, '作成量は 0 より大きい値を入力してください');
+  const madeOn = str(input.made_on) || null;
+  if (madeOn && !/^\d{4}-\d{2}-\d{2}$/.test(madeOn)) throw new HttpError(400, '作成日の形式が不正です');
+
+  const temps = Array.isArray(input.barrel_temps) ? input.barrel_temps : [];
+  const barrel = Array.from({ length: BARREL_ZONES }, (_, i) => optNum(temps[i], `バレル温度 C${i + 1}`));
+
+  const cond = {};
+  for (const f of COND_FIELDS) cond[f.key] = optNum(input[f.key], f.label);
+
+  const judgement = input.judgement || null;
+  if (judgement !== null && !(judgement in JUDGEMENTS)) throw new HttpError(400, '総合判定が不正です');
+
+  const extras = (Array.isArray(input.extras) ? input.extras : []).map(e => {
+    const label = str(e.label);
+    if (e.category !== 'condition' && e.category !== 'measurement') throw new HttpError(400, '自由項目の区分が不正です');
+    if (!label) throw new HttpError(400, '自由項目: 項目名が空の行があります');
+    return { category: e.category, label, value: str(e.value), unit: str(e.unit) };
+  });
+
+  return {
+    code, created_by: createdBy, total_qty_g: qty, made_on: madeOn,
+    barrel_temps_json: JSON.stringify(barrel),
+    die_temp_c: optNum(input.die_temp_c, 'ダイ温度'),
+    ...cond,
+    judgement,
+    appearance_note: str(input.appearance_note) || null,
+    memo: str(input.memo) || null,
+    extras,
+  };
+}
+
+/**
+ * サンプルを保存する。
+ * 新規: 配合の現在の内容から秤量明細（スナップショット）を作る。
+ * 更新: 保存済みのスナップショットを元に狙い量だけ作り直し、配合の変更は反映しない。
+ */
+export function saveSample(input, id = null) {
+  const v = validateSample(input);
+  return tx(() => {
+    const clash = db.prepare('SELECT id FROM samples WHERE code = ? AND id IS NOT ?').get(v.code, id);
+    if (clash) throw new HttpError(409, `サンプル番号「${v.code}」は既に使われています`);
+
+    let recipeId, baseId, basis;
+    if (id === null) {
+      const r = getRecipe(Number(input.recipe_id));
+      if (r.version !== Number(input.recipe_version)) {
+        throw new HttpError(409, 'この配合は画面を開いた後に変更されています。配合を選び直して、狙い量を確認してから保存してください');
+      }
+      recipeId = r.id;
+      baseId = r.base_material_id;
+      basis = r.items;
+    } else {
+      const cur = db.prepare('SELECT recipe_id, version FROM samples WHERE id = ?').get(id);
+      if (!cur) throw new HttpError(404, 'サンプルが見つかりません');
+      if (cur.version !== Number(input.version)) {
+        throw new HttpError(409, '他の人がこのサンプルを先に保存しました。開き直して最新の内容を確認してください');
+      }
+      recipeId = cur.recipe_id;
+      const old = weighingsOf(id);
+      baseId = old.find(w => w.row_type === 'base').material_id;
+      basis = old.filter(w => w.row_type === 'additive').map(w => ({
+        material_id: w.material_id, target_active_pct: w.target_active_pct, active_pct: w.active_pct_snapshot,
+      }));
+    }
+
+    const tw = targetWeighings(v.total_qty_g, baseId, basis);
+    if (tw.over) throw new HttpError(400, '配合過剰: 添加剤の合計が作成量を超えています');
+
+    const actuals = new Map((Array.isArray(input.actuals) ? input.actuals : [])
+      .map(a => [`${a.row_type}:${a.material_id}`, a.actual_g]));
+    const rows = tw.rows.map(r => {
+      const actual = optNum(actuals.get(`${r.row_type}:${r.material_id}`), '実秤量');
+      if (actual !== null && actual < 0) throw new HttpError(400, '実秤量は 0 以上で入力してください');
+      return { ...r, actual_g: actual };
+    });
+
+    const cols = ['code', 'created_by', 'total_qty_g', 'made_on', 'barrel_temps_json', 'die_temp_c',
+      ...COND_FIELDS.map(f => f.key), 'judgement', 'appearance_note', 'memo'];
+    const vals = cols.map(c => v[c]);
+    if (id === null) {
+      id = Number(db.prepare(
+        `INSERT INTO samples (recipe_id, ${cols.join(', ')}) VALUES (?, ${cols.map(() => '?').join(', ')})`
+      ).run(recipeId, ...vals).lastInsertRowid);
+    } else {
+      db.prepare(`
+        UPDATE samples SET ${cols.map(c => `${c} = ?`).join(', ')},
+          version = version + 1, updated_at = datetime('now', 'localtime')
+        WHERE id = ?
+      `).run(...vals, id);
+      db.prepare('DELETE FROM sample_weighings WHERE sample_id = ?').run(id);
+      db.prepare('DELETE FROM sample_extras WHERE sample_id = ?').run(id);
+    }
+
+    const insW = db.prepare(`
+      INSERT INTO sample_weighings (sample_id, material_id, row_type, target_active_pct, active_pct_snapshot, target_g, actual_g)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `);
+    for (const r of rows) {
+      insW.run(id, r.material_id, r.row_type, r.target_active_pct, r.active_pct_snapshot, r.target_g, r.actual_g);
+    }
+    const insE = db.prepare('INSERT INTO sample_extras (sample_id, category, label, value, unit) VALUES (?, ?, ?, ?, ?)');
+    for (const e of v.extras) insE.run(id, e.category, e.label, e.value, e.unit);
+
+    return getSample(id);
+  });
+}
+
+export function deleteSample(id) {
+  const { changes } = db.prepare('DELETE FROM samples WHERE id = ?').run(id);
+  if (!changes) throw new HttpError(404, 'サンプルが見つかりません');
+  return { ok: true };
 }
