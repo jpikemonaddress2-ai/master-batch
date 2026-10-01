@@ -1,7 +1,7 @@
 // 画面4: 比較（選んだサンプルを列に並べた転置表）
 import { buildMatrix, GROUPS, sortForCompare, visibleRows } from './matrix.mjs';
 import { JUDGEMENTS } from './fields.mjs';
-import { $, esc, api, state } from './common.js';
+import { $, esc, api, state, alertBox, warnBox, downloadCsv, whileBusy } from './common.js';
 
 const MAX_CSV = 200;   // CSV に出せる件数（server.mjs の MAX_COMPARE と同じ）
 
@@ -44,6 +44,7 @@ function clear() {
   matrix = [];
   ids = [];
   $('#cCsv').hidden = true;
+  $('#cAlert').innerHTML = '';
 }
 
 function cell(row, v) {
@@ -67,10 +68,24 @@ function render() {
     }
   }
   $('#cRows').innerHTML = out.join('');
-  // 画面に出している行・列のまま CSV にする（他の人がその後で直した場合は、ダウンロード時点の内容になる）
-  $('#cCsv').href = `/api/samples/compare.csv?ids=${ids.join(',')}${onlyDiff ? '&onlyDiff=1' : ''}`;
+  $('#cAlert').innerHTML = '';   // 前の CSV の知らせは、表示を変えたら消す
   $('#cCsv').hidden = ids.length > MAX_CSV;
   if (ids.length > MAX_CSV) $('#cNote').textContent = `CSV に出せるのは ${MAX_CSV} 件までです。サンプル一覧で選び直してください。`;
 }
 
 $('#cOnlyDiff').onchange = render;
+
+// 画面に出している行・列のまま CSV にする（他の人がその後で直した場合は、ダウンロード時点の内容になる）
+$('#cCsv').onclick = () => whileBusy($('#cCsv'), 'CSV を作成中…', async () => {
+  $('#cAlert').innerHTML = '';
+  const my = seq;   // 取得している間に比べるサンプルを選び直したら、古い結果は出さない
+  let msg;
+  try {
+    const { skipped } = await downloadCsv(`/api/samples/compare.csv?ids=${ids.join(',')}${$('#cOnlyDiff').checked ? '&onlyDiff=1' : ''}`);
+    // ダウンロードはできているので、エラー（赤）ではなく注意（橙）で知らせる
+    msg = skipped ? warnBox(`${skipped} 件のサンプルは、この画面を開いた後に削除されたため CSV に含めていません（画面の表より列が少なくなっています）。`) : '';
+  } catch (e) {
+    msg = alertBox(`CSV をエクスポートできませんでした: ${e.message}`);
+  }
+  if (my === seq) $('#cAlert').innerHTML = msg;
+});

@@ -5,9 +5,8 @@ import { hostname, networkInterfaces } from 'node:os';
 import { exec } from 'node:child_process';
 import { PORT, HOST, PUBLIC_DIR, BARREL_ZONES, EXTRA_HOSTS } from './config.mjs';
 import { allowedHostSet, checkRequest } from './guard.mjs';
+import { HttpError, parseIds, contentDisposition } from './http-util.mjs';
 import * as store from './db.mjs';
-
-const { HttpError } = store;
 
 // 配信するファイルの種類。ここに無い拡張子は返さない
 // （Windows の予約名 CON / AUX などを開こうとして止まるのも防ぐ）
@@ -64,24 +63,21 @@ function guard(req, url) {
   if (bad) throw new HttpError(bad.status, bad.message);
 }
 
-class Csv { constructor(body, filename) { this.body = body; this.filename = filename; } }
+// headers: 追加の応答ヘッダ（例: 比較の CSV で、削除されていて出せなかった件数）
+class Csv { constructor(body, filename, headers = {}) { this.body = body; this.filename = filename; this.headers = headers; } }
 const filters = q => Object.fromEntries(['recipe', 'from', 'to', 'judgement', 'q'].map(k => [k, q.get(k) || null]));
 const stamp = () => new Date().toLocaleDateString('sv-SE').replaceAll('-', '');
 
-// 比較する（CSV に出す）サンプルの id。カンマ区切り
-const MAX_COMPARE = 200;   // 画面側（compare.js）も同じ数で CSV のボタンを止める
-function compareIds(q) {
-  const raw = (q.get('ids') ?? '').split(',').filter(Boolean);
-  if (!raw.length) throw new HttpError(400, 'サンプルを選んでください');
-  if (raw.length > MAX_COMPARE) throw new HttpError(400, `一度に出せるのは ${MAX_COMPARE} 件までです`);
-  return [...new Set(raw.map(v => store.positiveId(v, 'サンプル')))];
-}
+const MAX_COMPARE = 200;   // 比較の CSV に出せる件数。画面側（compare.js）も同じ数でボタンを止める
 
 function compareCsv(q) {
-  const { samples, csv } = store.compareCsv(compareIds(q), { onlyDiff: q.get('onlyDiff') === '1' });
+  const ids = parseIds(q.get('ids'), MAX_COMPARE, 'サンプル');
+  const { samples, skipped, csv } = store.compareCsv(ids, { onlyDiff: q.get('onlyDiff') === '1' });
   // 差のある行だけの CSV は、全項目の CSV と取り違えないようファイル名で分ける
   const onlyDiff = q.get('onlyDiff') === '1' && samples.length > 1;
-  return new Csv(csv, samples.length === 1 ? `sample_${samples[0].code}.csv` : `compare${onlyDiff ? '_diff' : ''}_${stamp()}.csv`);
+  return new Csv(csv, samples.length === 1 ? `sample_${samples[0].code}.csv` : `compare${onlyDiff ? '_diff' : ''}_${stamp()}.csv`,
+    // 画面を開いた後に削除されたサンプルは飛ばすので、その件数を画面に知らせる
+    { 'X-Skipped-Samples': String(skipped) });
 }
 
 // [メソッド, パスの正規表現, 処理(req, params, query)]。正規表現のキャプチャを params、クエリ文字列を query として渡す。
@@ -109,13 +105,6 @@ const routes = [
   ['GET', /^\/api\/extra-labels$/, () => store.listExtraLabels()],
 ];
 
-// サンプル番号は日本語や記号を含みうるので、ASCII に置き換えた名前と UTF-8 の名前（RFC 6266）の両方を付ける
-function contentDisposition(name) {
-  const filename = name.toWellFormed();   // 対になっていないサロゲートがあると encodeURIComponent が例外を投げる
-  const ascii = filename.replace(/[^A-Za-z0-9._-]/g, '_');
-  return `attachment; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(filename).replace(/['()*!]/g, c => `%${c.charCodeAt(0).toString(16).toUpperCase()}`)}`;
-}
-
 async function handleApi(req, res, url) {
   for (const [method, re, fn] of routes) {
     const m = url.pathname.match(re);
@@ -123,7 +112,7 @@ async function handleApi(req, res, url) {
       const out = await fn(req, m.slice(1), url.searchParams);
       if (out instanceof Csv) {
         return send(res, 200, out.body, 'text/csv; charset=utf-8',
-          { 'Content-Disposition': contentDisposition(out.filename) });
+          { 'Content-Disposition': contentDisposition(out.filename), ...out.headers });
       }
       return send(res, 200, out);
     }

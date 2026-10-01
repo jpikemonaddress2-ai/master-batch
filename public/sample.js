@@ -1,11 +1,13 @@
 // 画面2: サンプル記録
-import { targetWeighings, calcActual, weighOutliers, compositionSig, basisFromWeighings, archivedMessage, WEIGH_TOLERANCE } from './calc.mjs';
+import {
+  targetWeighings, calcActual, weighOutliers, compositionSig, compositionChanges, basisFromWeighings, archivedMessage, WEIGH_TOLERANCE,
+} from './calc.mjs';
 import { COND_FIELDS, JUDGEMENTS } from './fields.mjs';
 import { fmtDelta } from './format.mjs';
 import { buildMatrix } from './matrix.mjs';
 import {
   $, esc, fmt, fmtGram, fmtVal, toNum, alertBox, api, toast, state, matById, recipeById, reloadMasters,
-  createDirty, rememberedAuthor, rememberAuthor, today, showAlertWithAction, archivedInRecipe, stopOnBadNumber, setIfChanged,
+  createDirty, rememberedAuthor, rememberAuthor, today, showAlertWithAction, archivedInRecipe, stopOnBadNumber, setIfChanged, downloadCsv, whileBusy,
 } from './common.js';
 
 const RECENT = 50;     // 左の一覧に出す件数
@@ -130,6 +132,7 @@ function openDraft(d) {
   draft = d;
   dirty.set(false);
   $('#sAlert').innerHTML = '';
+  $('#sCsvAlert').innerHTML = '';
   drawSampleList();
   drawForm();
 }
@@ -162,7 +165,6 @@ function drawForm() {
   $('#sDelete').hidden = isNew;
   $('#sCopy').hidden = isNew;
   $('#sCsv').hidden = isNew;
-  if (!isNew) $('#sCsv').href = `/api/samples/compare.csv?ids=${draft.id}`;
   // 記入者は作成時に確定する。既存サンプルを直す人は「変更者」として毎回名前を残す
   $('#sBy').disabled = !isNew;
   $('#sEditorField').hidden = isNew;
@@ -302,7 +304,7 @@ function calcSample() {
   const r = draft.id === null ? recipeById(draft.recipe_id) : null;
   const stopped = r ? archivedInRecipe(r) : [];
   setIfChanged($('#sWeighAlert'),
-    (stopped.length ? alertBox(`${archivedMessage(stopped, r.sample_count)}。`, { live: false }) : '') +
+    (stopped.length ? alertBox(archivedMessage(stopped, r.sample_count), { live: false }) : '') +
     (over ? alertBox('配合過剰: 添加剤の合計が作成量を超えています。作成量を見直してください。', { live: false }) : '') +
     (outliers.size ? `<div class="warn">実秤量が狙い量から ${WEIGH_TOLERANCE * 100}% 以上ずれている行があります（桁の打ち間違いがないか確認してください）。</div>` : ''));
   // 保存できない理由は、保存ボタンの横にも出す（秤量表の下の警告は、ボタンまでスクロールすると見えない）
@@ -540,8 +542,17 @@ $('#newSample').onclick = () => {
 };
 
 // CSV は保存済みの内容で出る。未保存の変更があるときは、その旨を確かめる
-$('#sCsv').onclick = e => {
-  if (dirty.get() && !confirm('保存していない変更は CSV に含まれません（保存済みの内容で出力します）。よろしいですか？')) e.preventDefault();
+// エラーは保存のエラー（#sAlert。「最新を読み直す」などの回復ボタンが出る）とは別の欄に出す
+$('#sCsv').onclick = () => {
+  if (dirty.get() && !confirm('保存していない変更は CSV に含まれません（保存済みの内容でエクスポートします）。よろしいですか？')) return;
+  return whileBusy($('#sCsv'), 'CSV を作成中…', async () => {
+    $('#sCsvAlert').innerHTML = '';
+    try {
+      await downloadCsv(`/api/samples/compare.csv?ids=${draft.id}`);
+    } catch (e) {
+      $('#sCsvAlert').innerHTML = alertBox(`CSV をエクスポートできませんでした: ${e.message}`);
+    }
+  });
 };
 
 $('#addCond').onclick = () => addExtra('condition');
@@ -574,10 +585,6 @@ $('#sRecipe').onchange = e => {
   drawWeigh();
 };
 
-// 狙い量の比較用。行ごとの「狙い濃度/有効成分%」（ベース樹脂は空）
-const basisMap = b => new Map([[`base:${b.base_material_id}`, ''],
-  ...b.items.map(i => [`additive:${i.material_id}`, `${i.target_active_pct}/${i.active_pct}`])]);
-
 /**
  * 新規の下書きの狙い量を、配合の最新の内容で作り直す。
  * 入力中に他の人が組成を変えていたら、黙って差し替えず、変わった行を色付けして知らせる。
@@ -590,9 +597,7 @@ function syncNewDraft({ force = false } = {}) {
   Object.assign(draft, { recipe_id: r.id, basis: basisFromRecipe(r) });
   // 何も入力していなければ黙って最新にしてよい。保存しようとして止められたとき（force）は、どこが変わったかを示す
   if (!prev || (!dirty.get() && !force)) return false;
-  const before = basisMap(prev), now = basisMap(draft.basis);
-  const changed = [...now].filter(([k, v]) => before.get(k) !== v).map(([k]) => k);
-  const removed = [...before.keys()].filter(k => !now.has(k));
+  const { changed, removed } = compositionChanges(prev, draft.basis);
   if (!changed.length && !removed.length) return false;
   // 色付けは、この下書きを開き直すか配合を選び直すまで残す（続けて2回変わっても、最初の変更の印を消さない）
   changed.forEach(k => draft.changed.add(k));

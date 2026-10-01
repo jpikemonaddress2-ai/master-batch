@@ -26,7 +26,7 @@ const s2 = v => (v === null || v === undefined) ? '' : String(v);
  *   live: サンプルの記録ではなく、表示のたびに配合から引く値（配合名）。
  *         配合の名前を変えるとサンプルの履歴の差分に紛れ込むので、変更履歴の差分では扱わない
  */
-export function sampleEntries(s, zones) {
+export function sampleEntries(s, zones, { csv = false } = {}) {
   const out = [];
   const add = (group, key, label, unit, value, extra = {}) =>
     out.push({ group, key, label, unit: unit ?? '', value: s2(value), ...extra });
@@ -41,7 +41,9 @@ export function sampleEntries(s, zones) {
   // 実秤量が1つも入っていなければ実濃度は出さない（狙い値の写しになって紛らわしいため）。
   // 一部の行だけ入っているときは、未入力の行を狙い量で補った推定値なので（推定）と付ける
   const act = calcActual(s.weighings);
-  const real = w => !act.entered ? '' : `${Number.isFinite(w.real_pct) ? w.real_pct.toFixed(3) : ''}${w.estimated ? '（推定）' : ''}`;
+  const realNum = w => !act.entered || !Number.isFinite(w.real_pct) ? '' : w.real_pct.toFixed(3);
+  // CSV では値を数値だけにして（表計算で集計できるように）、推定かどうかは別の行に出す
+  const real = w => csv ? realNum(w) : `${realNum(w)}${act.entered && w.estimated ? '（推定）' : ''}`;
   for (const w of act.rows) {
     if (w.row_type === 'base') {
       add('weigh', 'base', 'ベース樹脂', '', w.material_name);
@@ -58,6 +60,7 @@ export function sampleEntries(s, zones) {
     add('weigh', `${k}:target_g`, `${n} 狙い量`, 'g', fmtG(w.target_g));
     add('weigh', `${k}:actual`, `${n} 実秤量`, 'g', fmtRaw(w.actual_g));
     add('weigh', `${k}:real`, `${n} 実濃度`, 'wt%', real(w));
+    if (csv) add('weigh', `${k}:real_kind`, `${n} 実濃度の区分`, '', realNum(w) === '' ? '' : w.estimated ? '推定' : '実測');
   }
 
   const temps = s.barrel_temps ?? [];
@@ -94,12 +97,13 @@ export function sampleEntries(s, zones) {
  * 複数サンプルを転置表にする。項目はグループ順、グループ内は最初に現れた順。
  * 単位が全サンプルで揃っていれば見出しに付け、揃っていなければ各セルの値に付ける。
  *
- * @param {{allDiff?:boolean}} [opts] allDiff: サンプル番号・作成日・記入者も差分として扱う（変更履歴の差分用）
+ * @param {{allDiff?:boolean, csv?:boolean}} [opts] allDiff: サンプル番号・作成日・記入者も差分として扱う（変更履歴の差分用）
+ *   csv: CSV 用の値にする（実濃度は数値だけにし、推定かどうかは別の行）
  * @returns {{group:string, key:string, label:string, unit:string, cells:string[], diff:boolean}[]}
  *   diff: セルの値が揃っていない（＝振った条件・出た差）。片方だけ空の場合も差とみなす
  */
-export function buildMatrix(samples, zones, { allDiff = false } = {}) {
-  const per = samples.map(s => new Map(sampleEntries(s, zones).map(e => [e.key, e])));
+export function buildMatrix(samples, zones, { allDiff = false, csv = false } = {}) {
+  const per = samples.map(s => new Map(sampleEntries(s, zones, { csv }).map(e => [e.key, e])));
   const rows = [];
   for (const g of GROUPS) {
     const keys = [];
@@ -111,7 +115,8 @@ export function buildMatrix(samples, zones, { allDiff = false } = {}) {
     }
     for (const key of keys) {
       const es = per.map(m => m.get(key));
-      const units = new Set(es.filter(e => e?.unit && e.value !== '').map(e => e.unit));
+      // 単位の空欄も1つの単位として数える（空欄の値を、他のサンプルの単位で記録したように見せない）
+      const units = new Set(es.filter(e => e && e.value !== '').map(e => e.unit));
       const shared = units.size <= 1;
       const unit = shared ? ([...units][0] ?? meta.get(key).unit) : '';
       const cells = es.map(e => (!e || e.value === '') ? '' : (shared || !e.unit ? e.value : `${e.value} ${e.unit}`));
@@ -119,6 +124,13 @@ export function buildMatrix(samples, zones, { allDiff = false } = {}) {
       const counts = allDiff ? !(m.stamp || m.live) : !m.noDiff;
       rows.push({ group: g.id, key, label: m.label, unit, cells, diff: counts && new Set(cells).size > 1 });
     }
+  }
+  // CSV の実濃度（数値）と区分（推定/実測）は組で1つの値。どちらかに差があれば両方を差とし、
+  // 「差のある行だけ」でも片方だけ残らないようにする（区分が落ちると、推定値が実測値に見える）
+  const byKey = new Map(rows.map(r => [r.key, r]));
+  for (const r of rows) {
+    const kind = r.key.endsWith(':real') && byKey.get(`${r.key}_kind`);
+    if (kind) r.diff = kind.diff = r.diff || kind.diff;
   }
   return rows;
 }
@@ -153,7 +165,7 @@ const csvText = lines => '\ufeff' + lines.map(l => l.map(csvCell).join(',')).joi
 export function toMatrixCsv(samples, zones, { onlyDiff = false } = {}) {
   const many = samples.length > 1;
   const label = Object.fromEntries(GROUPS.map(g => [g.id, g.label]));
-  const rows = visibleRows(buildMatrix(samples, zones), onlyDiff && many);
+  const rows = visibleRows(buildMatrix(samples, zones, { csv: true }), onlyDiff && many);
   const header = ['区分', '項目', '単位', ...(many ? ['差'] : []), ...samples.map(s => s.code)];
   return csvText([header, ...rows.map(r =>
     [label[r.group], r.label, r.unit, ...(many ? [r.diff ? '有' : ''] : []), ...r.cells])]);
@@ -161,7 +173,7 @@ export function toMatrixCsv(samples, zones, { onlyDiff = false } = {}) {
 
 /** 1行1サンプルの CSV */
 export function toCsv(samples, zones) {
-  const rows = buildMatrix(samples, zones);
+  const rows = buildMatrix(samples, zones, { csv: true });
   const prefix = Object.fromEntries(GROUPS.map(g => [g.id, g.csv ?? '']));
   const header = rows.map(r => `${prefix[r.group]}${r.label}${r.unit ? ` (${r.unit})` : ''}`);
   const lines = [header, ...samples.map((_, i) => rows.map(r => r.cells[i]))];

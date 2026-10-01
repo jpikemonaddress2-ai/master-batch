@@ -1,4 +1,5 @@
-// 配合計算ロジック。画面（recipe.js / sample.js）とサーバー（db.mjs）の両方から import する。
+// 配合計算ロジックと、それに付随する判定（使用停止の原料、組成の差分）。
+// 画面（recipe.js / sample.js）とサーバー（db.mjs）の両方から import する。
 // 計算はここ一箇所だけに置き、二重実装による食い違いを防ぐ。
 
 // 浮動小数の誤差で「ちょうど総量」が配合過剰扱いにならないための許容幅 (g)
@@ -103,12 +104,44 @@ export function archivedNames(recipe, base) {
   return [...(base?.archived ? [base.name] : []), ...recipe.items.filter(i => i.archived).map(i => i.material_name)];
 }
 
+/**
+ * 使用停止の原料のうち、保存済みの組成に無かったもの（＝新しく組み込もうとしているもの）。
+ * 配合の保存で拒否する。保存済みの組成に元からあるものは、名前やメモを直せるよう許す
+ * @param {{id:number, name:string}[]} stopped 保存しようとしている組成に含まれる使用停止の原料
+ * @param {{base_material_id:number, items:{material_id:number}[]}|null} saved 保存済みの配合（新規・複製なら null）
+ */
+export function archivedAdded(stopped, saved) {
+  const had = new Set(saved ? [saved.base_material_id, ...saved.items.map(i => i.material_id)] : []);
+  return stopped.filter(m => !had.has(m.id));
+}
+
+/** archivedAdded で見つかった原料を拒否するときの案内 */
+export function archivedAddedMessage(added) {
+  return `使用停止の原料（${added.map(m => m.name).join('、')}）は配合に使えません。別の原料に置き換えてください。`;
+}
+
 /** 使用停止の原料を含む配合から新しいサンプルを作ろうとしたときの案内 */
 export function archivedMessage(names, sampleCount) {
   return `この配合には使用停止の原料（${names.join('、')}）が含まれているため、新しいサンプルを作れません。` +
     (sampleCount > 0
-      ? '配合タブで「複製」し、原料を置き換えた配合を使ってください'
-      : '配合タブでこの配合の原料を置き換えてから作ってください');
+      ? '配合タブで「複製」し、原料を置き換えた配合を使ってください。'
+      : '配合タブでこの配合の原料を置き換えてから作ってください。');
+}
+
+/**
+ * 狙い量の計算元（basis）の違いを行ごとに出す。入力途中のサンプルで、配合の組成が変わった行を知らせるのに使う。
+ * 行のキーは秤量の行と同じ 'base:<原料ID>' / 'additive:<原料ID>'
+ * @returns {{changed:string[], removed:string[]}}
+ *   changed: 新しい組成で増えた行と、狙い濃度・有効成分% が変わった行。removed: 新しい組成から外れた行
+ */
+export function compositionChanges(prev, next) {
+  const rows = b => new Map([[`base:${b.base_material_id}`, ''],
+    ...b.items.map(i => [`additive:${i.material_id}`, `${i.target_active_pct}/${i.active_pct}`])]);
+  const before = rows(prev), now = rows(next);
+  return {
+    changed: [...now].filter(([k, v]) => before.get(k) !== v).map(([k]) => k),
+    removed: [...before.keys()].filter(k => !now.has(k)),
+  };
 }
 
 /** 保存済みサンプルの秤量明細（スナップショット）から、狙い量の計算元を作る */

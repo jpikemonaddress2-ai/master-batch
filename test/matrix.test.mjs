@@ -88,3 +88,33 @@ test('サンプル1件の CSV には「差」の列を付けない', () => {
   assert.equal(lines[0], '"区分","項目","単位","S-001"');
   assert.ok(lines.includes('"造粒条件","ダイ温度（設定）","℃","195"'));
 });
+
+test('CSV 用: 実濃度は数値だけにし、推定かどうかは別の行に出す（表計算で集計できるように）', () => {
+  const s = sample({ weighings: [
+    { row_type: 'additive', material_id: 2, material_name: 'AO', target_active_pct: 2, active_pct_snapshot: 50, target_g: 40, actual_g: 41 },
+    { row_type: 'base', material_id: 1, material_name: 'PP', target_g: 960, actual_g: null },
+  ] });
+  const rows = buildMatrix([s], 2, { csv: true });
+  assert.ok(Number.isFinite(Number(rows.find(r => r.key === 'add:2:real').cells[0])));
+  assert.equal(rows.find(r => r.key === 'add:2:real_kind').cells[0], '推定');
+  // 画面用には区分の行を出さない
+  assert.equal(buildMatrix([s], 2).find(r => r.key === 'add:2:real_kind'), undefined);
+});
+
+test('単位が空の値と単位付きの値が混ざるときは、空の値を他のサンプルの単位で見せない', () => {
+  const a = sample({ extras: [{ category: 'measurement', label: 'MFR', value: '1.2', unit: 'g/10min' }] });
+  const b = sample({ id: 2, extras: [{ category: 'measurement', label: 'MFR', value: '1.5', unit: '' }] });
+  const row = buildMatrix([a, b], 2).find(r => r.label === 'MFR');
+  assert.equal(row.unit, '');
+  assert.deepEqual(row.cells, ['1.2 g/10min', '1.5']);
+});
+
+test('比較の CSV（差のある行だけ）: 実濃度の数値に差があれば、推定の区分の行も一緒に残す', () => {
+  const w = actual => [
+    { row_type: 'additive', material_id: 2, material_name: 'AO', target_active_pct: 2, active_pct_snapshot: 50, target_g: 40, actual_g: actual },
+    { row_type: 'base', material_id: 1, material_name: 'PP', target_g: 960, actual_g: null },
+  ];
+  const lines = toMatrixCsv([sample({ weighings: w(40) }), sample({ id: 2, code: 'S-002', weighings: w(44) })], 2, { onlyDiff: true });
+  assert.match(lines, /"AO 実濃度","wt%","有"/);
+  assert.match(lines, /"AO 実濃度の区分","","有","推定","推定"/);
+});

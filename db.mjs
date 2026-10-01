@@ -2,14 +2,12 @@ import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { DB_PATH, BARREL_ZONES } from './config.mjs';
-import { calcCharge, targetWeighings, compositionSig, basisFromWeighings, archivedNames, archivedMessage } from './public/calc.mjs';
+import {
+  calcCharge, targetWeighings, compositionSig, basisFromWeighings, archivedNames, archivedMessage, archivedAdded, archivedAddedMessage,
+} from './public/calc.mjs';
 import { COND_FIELDS, JUDGEMENTS, MAX_ZONES, MAX_EXTRAS, MAX_ITEMS } from './public/fields.mjs';
 import { toCsv, toMatrixCsv, sortForCompare } from './public/matrix.mjs';
-
-export class HttpError extends Error {
-  // code: 画面側で回復手段を出し分けるための識別子（例: 'stale' = 他の人が先に保存した）
-  constructor(status, message, code = null) { super(message); this.status = status; this.code = code; }
-}
+import { HttpError, positiveId } from './http-util.mjs';
 
 mkdirSync(dirname(DB_PATH), { recursive: true });
 const db = new DatabaseSync(DB_PATH);
@@ -236,13 +234,6 @@ const list = (v, max, label) => {
   return a;
 };
 
-// URL などから来た id。正の整数でなければ 400（NaN のまま渡すと SQL では NULL になり、絞り込みが外れる）
-export function positiveId(v, label) {
-  const n = Number(v);
-  if (!Number.isSafeInteger(n) || n <= 0) throw new HttpError(400, `${label}の指定が不正です`);
-  return n;
-}
-
 // 読み取りを1つのスナップショットで行う（途中で他の人が書き換えても食い違わないように）
 function readTx(fn) {
   db.exec('BEGIN');
@@ -358,7 +349,7 @@ function validateRecipe(input) {
     if (!m || m.kind !== 'additive') throw new HttpError(400, `添加剤 ${i + 1} 行目: 原料を選択してください`);
     const pct = num(it.target_active_pct);
     if (!(pct > 0)) throw new HttpError(400, `添加剤「${m.name}」: 狙い濃度は 0 より大きい値を入力してください`);
-    return { material_id: m.id, target_active_pct: pct, active_pct: m.active_pct, name: m.name };
+    return { material_id: m.id, target_active_pct: pct, active_pct: m.active_pct, name: m.name, archived: m.archived };
   });
   const ids = items.map(it => it.material_id);
   const dup = items.find((it, i) => ids.indexOf(it.material_id) !== i);
@@ -368,7 +359,19 @@ function validateRecipe(input) {
   if (c.over) {
     throw new HttpError(400, `配合過剰: 添加剤の合計 ${c.addTotal.toFixed(1)} g が作成量 ${qty} g を超えています`);
   }
-  return { code, name, qty, base_material_id: base.id, memo: str(input.memo) || null, items };
+  // 使用停止の原料（ベース樹脂を含む）。saveRecipe で、新しく組み込もうとしていないかを確かめる
+  const stopped = [...(base.archived ? [{ id: base.id, name: base.name }] : []),
+    ...items.filter(it => it.archived).map(it => ({ id: it.material_id, name: it.name }))];
+  return { code, name, qty, base_material_id: base.id, memo: str(input.memo) || null, items, stopped };
+}
+
+/**
+ * 使用停止の原料を配合に新しく組み込ませない（複製で写した場合も含む）。
+ * 組み込んだまま保存すると、その配合でサンプルを作るときに初めて止まり、秤量の現場で手戻りになる
+ */
+function rejectArchived(v, cur) {
+  const added = archivedAdded(v.stopped, cur);
+  if (added.length) throw new HttpError(400, archivedAddedMessage(added));
 }
 
 export function saveRecipe(input, id = null) {
@@ -380,6 +383,7 @@ export function saveRecipe(input, id = null) {
     if (clash) throw new HttpError(409, `配合コード「${v.code}」は既に使われています`);
 
     if (id === null) {
+      rejectArchived(v, null);
       id = Number(db.prepare(
         'INSERT INTO recipes (code, name, base_material_id, default_qty_g, memo) VALUES (?, ?, ?, ?, ?)'
       ).run(v.code, v.name, v.base_material_id, v.qty, v.memo).lastInsertRowid);
@@ -388,6 +392,7 @@ export function saveRecipe(input, id = null) {
       if (cur.version !== Number(input.version)) {
         throw new HttpError(409, '他の人がこの配合を先に保存しました。最新の内容を読み直してください', 'stale');
       }
+      rejectArchived(v, cur);
       // サンプルが付いた配合の組成やコードを変えると、同じ配合コードの下に組成の違うサンプルが混ざったり、
       // ノートに書いたコードが別の配合を指したりする。変えたいときは複製で新しい配合を作ってもらう
       if (cur.sample_count > 0 &&
@@ -500,7 +505,7 @@ export function compareCsv(ids, { onlyDiff = false } = {}) {
       try { return [getSample(id)]; } catch (e) { if (e.status === 404) return []; throw e; }
     });
     if (!samples.length) throw new HttpError(404, 'サンプルが見つかりません');
-    return { samples, csv: toMatrixCsv(sortForCompare(samples), BARREL_ZONES, { onlyDiff }) };
+    return { samples, skipped: ids.length - samples.length, csv: toMatrixCsv(sortForCompare(samples), BARREL_ZONES, { onlyDiff }) };
   });
 }
 

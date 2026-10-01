@@ -1,5 +1,5 @@
 // 画面1: 配合
-import { calcCharge } from './calc.mjs';
+import { calcCharge, archivedAdded, archivedAddedMessage } from './calc.mjs';
 import { fmtRaw } from './format.mjs';
 import {
   $, esc, fmt, fmtGram, fmtVal, toNum, alertBox, api, toast, state, matById, recipeById, reloadMasters,
@@ -38,7 +38,7 @@ function drawRecipeList() {
       ${r.sample_count ? `<span class="tag count" style="float:right" title="サンプル ${r.sample_count} 件">S ${r.sample_count}</span>` : ''}
       <span class="nm">${esc(r.name)}</span>
       <span class="meta">添加剤 ${r.items.length} 種 / ${Number(r.default_qty_g).toLocaleString()} g</span>
-      ${archivedInRecipe(r).length ? `<span class="caution block">⚠ 使用停止の原料を含む（${r.sample_count ? '複製して' : ''}置き換え）</span>` : ''}
+      ${archivedInRecipe(r).length ? `<span class="caution block">⚠ 使用停止の原料を含む（${r.sample_count ? '複製して' : ''}原料を置き換えてください）</span>` : ''}
     </button>`).join('');
   box.querySelectorAll('.list-item').forEach(el => el.onclick = () => {
     const r = state.recipes.find(x => x.id === Number(el.dataset.id));
@@ -133,16 +133,28 @@ function calcRecipe() {
     <div><div class="k">総量</div><div class="v">${fmtGram(W)}<small>g</small></div></div>
     <div><div class="k">仕込み比率（MB・キャリア込み）</div><div class="v">${fmt(W ? c.addTotal / W * 100 : 0, 2)}<small>wt%</small></div></div>
     <div><div class="k">有効成分 合計</div><div class="v">${fmtRaw(activeTotal) || '0'}<small>wt%</small></div></div>`;
-  setIfChanged($('#rAlert'), c.over
-    ? alertBox(`配合過剰: 添加剤の合計 ${fmtGram(c.addTotal)} g が総量 ${fmtGram(W)} g を超えています。狙い濃度か作成量を見直してください。`, { live: false })
-    : '');
-  $('#save').disabled = c.over;
+  // 使用停止の原料を新しく組み込もうとしていないか。手元の一覧（state）は古いことがあり、最終判定はサーバー
+  const added = archivedAdded(stoppedInDraft(), draft.id !== null ? recipeById(draft.id) ?? null : null);
+  setIfChanged($('#rAlert'),
+    (added.length ? alertBox(archivedAddedMessage(added), { live: false }) : '') +
+    (c.over ? alertBox(`配合過剰: 添加剤の合計 ${fmtGram(c.addTotal)} g が総量 ${fmtGram(W)} g を超えています。狙い濃度か作成量を見直してください。`, { live: false }) : ''));
+  // 保存できない理由は、保存ボタンの横にも出す（上の警告は、ボタンまでスクロールすると見えない）
+  const why = added.length ? '使用停止の原料を置き換えると保存できます（集計の下を参照）'
+    : c.over ? '配合過剰のため保存できません（集計の下を参照）' : '';
+  $('#rSaveWhy').textContent = why;
+  $('#save').disabled = !!why;
+}
+
+// 編集中の組成に含まれる使用停止の原料（ベース樹脂を含む）
+function stoppedInDraft() {
+  return [draft.base_material_id, ...draft.items.map(it => it.material_id)]
+    .map(matById).filter(m => m?.archived).map(m => ({ id: m.id, name: m.name }));
 }
 
 $('#rCode').oninput = e => { draft.code = e.target.value; dirty.set(true); };
 $('#rName').oninput = e => { draft.name = e.target.value; dirty.set(true); };
 $('#rMemo').oninput = e => { draft.memo = e.target.value; dirty.set(true); };
-$('#rBase').onchange = e => { draft.base_material_id = Number(e.target.value); dirty.set(true); };
+$('#rBase').onchange = e => { draft.base_material_id = Number(e.target.value); dirty.set(true); calcRecipe(); };
 $('#rQty').oninput = e => { draft.default_qty_g = toNum(e.target.value); dirty.set(true); calcRecipe(); };
 
 $('#addItem').onclick = () => {

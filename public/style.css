@@ -1,146 +1,207 @@
+/* 節は部品ごと。後ろの節ほど優先される上書き（compare の .hist、responsive、touch）を置くので、順番を崩さないこと */
+
+/* ---------- tokens ---------- */
 :root{
-  --bg:#eef1f5; --panel:#fff; --line:#d5dae2; --line-strong:#b6bfcc;
-  --ink:#1b2430; --muted:#67717f; --sub:#626c7a;
-  --accent:#1f5fd0; --accent-soft:#e8f0fe;
+  --bg:#eef1f5; --panel:#fff; --panel-head:#fafbfc; --line:#d5dae2; --line-strong:#b6bfcc;
+  --ink:#1b2430; --muted:#67717f; --sub:#626c7a; --faint:#b3bac5;
+  --chrome:#20293a; --chrome-sub:#9aa5b8;         /* ヘッダ・比較表のグループ行・トースト */
+  --hover:#f2f5f9; --row-hover:#f7f9fc; --field-off:#f3f5f8;
+  --accent:#1f5fd0; --accent-strong:#1a51b0; --accent-soft:#e8f0fe;
   --good:#146c43; --good-bg:#e4f4ea;
   --ok:#8a5a00;  --ok-bg:#fdf3e0;
-  --ng:#b02a1f;  --ng-bg:#fdeceb;
+  --ng:#b02a1f;  --ng-bg:#fdeceb; --ng-line:#e8b4b0;
   --diff-bg:#ffe7a3; --diff-line:#b98900; --diff-ink:#5c4300;
   --mono:"Consolas","SF Mono","Roboto Mono",monospace;
 }
+
+/* ---------- base ---------- */
 *{box-sizing:border-box}
 body{
   margin:0; background:var(--bg); color:var(--ink);
   font-family:"Segoe UI","Yu Gothic UI",Meiryo,sans-serif;
   font-size:13px; line-height:1.55;
 }
+[hidden]{display:none !important}
+.sr-only{position:absolute; width:1px; height:1px; overflow:hidden; clip:rect(0 0 0 0); white-space:nowrap}
+body.loading main{opacity:.5; pointer-events:none}
+body:not(.loading) #loadingNote{display:none}
+
 /* ---------- header / nav ---------- */
 header{
-  background:#20293a; color:#fff; padding:10px 18px;
+  background:var(--chrome); color:#fff; padding:10px 18px;
   display:flex; align-items:baseline; gap:12px;
 }
 header h1{font-size:15px; margin:0; font-weight:600; letter-spacing:.02em}
-.badge{
-  font-size:10px; background:#f0b429; color:#3a2c00; padding:2px 7px;
-  border-radius:3px; font-weight:700;
-}
-header .env{margin-left:auto; font-size:11px; color:#9aa5b8}
+header .env{margin-left:auto; font-size:11px; color:var(--chrome-sub)}
 nav{background:var(--panel); border-bottom:1px solid var(--line-strong); padding:0 12px; display:flex; gap:2px}
 nav button{
   background:none; border:0; border-bottom:2px solid transparent;
   padding:10px 16px; font-size:13px; color:var(--muted); cursor:pointer;
   font-family:inherit;
 }
-nav button:hover{color:var(--ink); background:#f6f8fa}
+nav button:hover{color:var(--ink); background:var(--row-hover)}
 nav button.on{color:var(--accent); border-bottom-color:var(--accent); font-weight:600}
-main{padding:16px; max-width:1400px}
-section[hidden]{display:none}
+nav button:disabled{color:var(--faint); cursor:default; background:none}
+
 /* ---------- layout ---------- */
+main{padding:16px; max-width:1400px}
 .cols{display:grid; grid-template-columns:260px 1fr; gap:16px; align-items:start}
 .panel{background:var(--panel); border:1px solid var(--line); border-radius:6px}
 .panel > h2{
   margin:0; font-size:12px; font-weight:700; color:var(--muted);
   padding:9px 14px; border-bottom:1px solid var(--line); letter-spacing:.06em;
-  background:#fafbfc; border-radius:6px 6px 0 0;
+  background:var(--panel-head); border-radius:6px 6px 0 0;
 }
 .panel .body{padding:14px}
 .row{display:flex; gap:14px; flex-wrap:wrap; align-items:flex-end}
+.sub-h{font-size:11px; font-weight:700; color:var(--muted); letter-spacing:.06em; margin:16px 0 8px; padding-bottom:5px; border-bottom:1px solid var(--line)}
+.sub-h:first-child{margin-top:0}
+.actions{display:flex; flex-wrap:wrap; gap:8px; margin-top:14px; padding-top:12px; border-top:1px solid var(--line)}
+.filters{display:flex; gap:12px; flex-wrap:wrap; align-items:flex-end; padding:12px 14px; border-bottom:1px solid var(--line); background:var(--panel-head)}
+.bar{display:flex; flex-wrap:wrap; gap:8px; align-items:center; padding:10px 14px; border-bottom:1px solid var(--line)}
+.bar .count{font-size:12px; color:var(--muted); margin-right:auto}
+
+/* ---------- form fields ---------- */
 .field{display:flex; flex-direction:column; gap:3px}
 .field label{font-size:11px; color:var(--muted); font-weight:600}
 .w-sm{width:96px} .w-md{width:150px} .w-lg{width:240px} .w-xl{width:320px}
-/* ---------- controls ---------- */
+.req{color:var(--ng); font-weight:700}
 input,select,textarea{
   font-family:inherit; font-size:13px; color:var(--ink); background:#fff;
   border:1px solid var(--line-strong); border-radius:4px; padding:5px 7px;
 }
 input:focus,select:focus,textarea:focus{outline:2px solid var(--accent-soft); border-color:var(--accent)}
 input[type=number]{font-family:var(--mono); text-align:right}
+input:disabled,select:disabled{background:var(--field-off); color:var(--sub)}
+/* 数値として読めない入力（「4e」など。common.js が付ける）。保存の前にも止める。:focus の枠より優先 */
+input.bad{border-color:var(--ng); background:var(--ng-bg)}
 textarea{resize:vertical; min-height:52px; width:100%}
+label.check{font-size:12px; display:flex; gap:6px; align-items:center}
+.zones{display:grid; grid-template-columns:repeat(auto-fill, minmax(62px, 1fr)); gap:6px; max-width:640px}
+.zones .field label{text-align:center; font-family:var(--mono)}
+.zones input{width:100%; padding:4px}
+fieldset.judge{border:0; margin:0; padding:0; display:flex; gap:14px; align-items:center; flex-wrap:wrap}
+fieldset.judge legend{font-size:11px; color:var(--muted); font-weight:600; padding:0; margin-bottom:4px; width:100%}
+fieldset.judge label{font-weight:400; color:var(--ink); font-size:13px}
+fieldset.judge label.muted{color:var(--muted)}
+
+/* ---------- buttons ---------- */
 button.btn{
   font-family:inherit; font-size:12px; padding:6px 13px; border-radius:4px;
   border:1px solid var(--line-strong); background:#fff; color:var(--ink); cursor:pointer;
 }
-button.btn:hover{background:#f2f5f9}
+button.btn:hover{background:var(--hover)}
 button.primary{background:var(--accent); border-color:var(--accent); color:#fff}
-button.primary:hover{background:#1a51b0}
-button.link{background:none;border:0;color:var(--accent);cursor:pointer;font-family:inherit;font-size:12px;padding:2px 4px}
-button.del{color:var(--ng); border-color:#e8b4b0; background:#fff; padding:3px 8px; font-size:11px; border-radius:3px; cursor:pointer; font-family:inherit}
-.actions{display:flex; flex-wrap:wrap; gap:8px; margin-top:14px; padding-top:12px; border-top:1px solid var(--line)}
+button.primary:hover{background:var(--accent-strong)}
+button.btn.danger{color:var(--ng); border-color:var(--ng-line)}
+button.btn.danger:hover{background:var(--ng-bg)}
+button.btn:disabled{opacity:.5; cursor:default}
+button.btn.primary:disabled:hover{background:var(--accent)}
+button.link{background:none; border:0; color:var(--accent); cursor:pointer; font-family:inherit; font-size:12px; padding:2px 4px}
+button.code-link{font-family:var(--mono); font-weight:600; font-size:12.5px; padding:0}
+button.del{color:var(--ng); border:1px solid var(--ng-line); background:#fff; padding:3px 8px; font-size:11px; border-radius:3px; cursor:pointer; font-family:inherit}
+button.link:disabled,button.del:disabled{color:var(--sub); border-color:var(--line); background:none; cursor:default; opacity:.6}
+button.list-item:focus-visible,button.link:focus-visible{outline:2px solid var(--accent); outline-offset:-2px}
+
 /* ---------- tables ---------- */
+.wrapper{overflow-x:auto}
 table{border-collapse:collapse; width:100%; font-size:12.5px}
 th,td{border-bottom:1px solid var(--line); padding:6px 9px; text-align:left; vertical-align:middle}
 thead th{
-  background:#fafbfc; font-size:11px; color:var(--muted); font-weight:700;
+  background:var(--panel-head); font-size:11px; color:var(--muted); font-weight:700;
   border-bottom:1px solid var(--line-strong); white-space:nowrap;
 }
 td.num,th.num{text-align:right; font-family:var(--mono)}
-tbody tr:hover{background:#f7f9fc}
-.list-item{
+tbody tr:hover{background:var(--row-hover)}
+tr.clickable{cursor:pointer}
+tr.archived td{color:var(--sub)}
+/* 一覧のチェック列は、列全体を押せる */
+td.sel{cursor:default; text-align:center}
+td.sel input{width:18px; height:18px; vertical-align:middle}
+/* 秤量表 */
+table.weigh .lot-col{min-width:90px; width:110px}
+td.outlier input{border-color:var(--ok); background:var(--ok-bg)}
+tr.changed td{background:var(--diff-bg)}
+.empty{padding:40px; text-align:center; color:var(--sub)}
+
+/* ---------- side lists ---------- */
+button.list-item{
+  display:block; width:100%; text-align:left; background:none; border:0; font:inherit; color:inherit;
   padding:9px 14px; border-bottom:1px solid var(--line); cursor:pointer;
 }
-.list-item:hover{background:#f4f7fb}
+.list-item:hover{background:var(--hover)}
 .list-item.on{background:var(--accent-soft); box-shadow:inset 3px 0 0 var(--accent)}
 .list-item .code{font-family:var(--mono); font-size:11px; color:var(--accent); font-weight:600}
 .list-item .nm{display:block}
 .list-item .meta{font-size:11px; color:var(--sub)}
-/* ---------- misc ---------- */
+
+/* ---------- tags / summary ---------- */
 .tag{display:inline-block; padding:1px 8px; border-radius:10px; font-size:11px; font-weight:700; white-space:nowrap}
 .tag.good{background:var(--good-bg); color:var(--good)}
 .tag.ok{background:var(--ok-bg); color:var(--ok)}
 .tag.ng{background:var(--ng-bg); color:var(--ng)}
+.tag.count{background:var(--accent-soft); color:var(--accent)}
 .summary{
   display:flex; gap:0; margin-top:14px; border:1px solid var(--line-strong);
-  border-radius:5px; overflow:hidden; background:#fbfcfd;
+  border-radius:5px; overflow:hidden; background:var(--panel-head);
 }
 .summary div{padding:9px 16px; border-right:1px solid var(--line); flex:1}
 .summary div:last-child{border-right:0}
 .summary .k{font-size:11px; color:var(--muted); font-weight:600}
 .summary .v{font-family:var(--mono); font-size:17px; font-weight:600}
 .summary .v small{font-size:11px; color:var(--sub); font-weight:400; margin-left:2px}
-.note{font-size:11.5px; color:var(--muted); background:#f7f9fb; border-left:3px solid var(--line-strong); padding:8px 11px; margin-top:12px; border-radius:0 4px 4px 0}
-.alert{background:var(--ng-bg); border-left:3px solid var(--ng); color:var(--ng); font-weight:600; padding:8px 11px; margin-top:12px; border-radius:0 4px 4px 0; font-size:12px}
 .delta.plus{color:var(--ng)} .delta.minus{color:var(--accent)} .delta.zero{color:var(--sub)}
-.zones{display:grid; grid-template-columns:repeat(auto-fill, minmax(62px, 1fr)); gap:6px; max-width:640px}
-.zones .field label{text-align:center; font-family:var(--mono)}
-.zones input{width:100%; padding:4px}
-.sub-h{font-size:11px; font-weight:700; color:var(--muted); letter-spacing:.06em; margin:16px 0 8px; padding-bottom:5px; border-bottom:1px solid var(--line)}
-.sub-h:first-child{margin-top:0}
-.filters{display:flex; gap:12px; flex-wrap:wrap; align-items:flex-end; padding:12px 14px; border-bottom:1px solid var(--line); background:#fafbfc}
-.bar{display:flex; flex-wrap:wrap; gap:8px; align-items:center; padding:10px 14px; border-bottom:1px solid var(--line)}
-.bar .count{font-size:12px; color:var(--muted); margin-right:auto}
-/* compare */
+
+/* ---------- messages ---------- */
+.hint{font-size:11.5px; color:var(--sub); padding:10px 0}
+.note{font-size:11.5px; color:var(--muted); background:var(--panel-head); border-left:3px solid var(--line-strong); padding:8px 11px; margin-top:12px; border-radius:0 4px 4px 0}
+.alert{background:var(--ng-bg); border-left:3px solid var(--ng); color:var(--ng); font-weight:600; padding:8px 11px; margin-top:12px; border-radius:0 4px 4px 0; font-size:12px}
+.warn{background:var(--ok-bg); border-left:3px solid var(--ok); color:var(--ok); padding:8px 11px; margin-top:12px; border-radius:0 4px 4px 0; font-size:12px; font-weight:600}
+.filters .warn{margin-top:0; align-self:center}
+/* 一覧・比較のツールバーの下に出す知らせ */
+.bar-msg{padding:0 14px}
+.bar-msg:not(:empty){padding-bottom:10px}
+.caution{font-size:11px; color:var(--ng); font-weight:600}
+.caution.block{display:block}
+.est{font-size:10px; font-weight:600; color:var(--ok); margin-left:4px}
+.dirty-mark{font-size:11px; color:var(--ok); font-weight:700; margin-left:8px}
+.lock-tag{font-size:11px; font-weight:600; color:var(--ok); margin-left:10px; letter-spacing:0}
+.history{margin-top:16px}
+.history li{margin:3px 0}
+
+/* ---------- compare（比較表と、変更履歴の差分） ---------- */
 .cmp th[scope=row],.cmp th:first-child,.cmp td:first-child{
-  position:sticky; left:0; background:#fafbfc; font-weight:600; color:var(--muted);
+  position:sticky; left:0; background:var(--panel-head); font-weight:600; color:var(--muted);
   border-right:1px solid var(--line-strong); width:190px; font-size:11.5px;
 }
-.cmp tr.diff th[scope=row],.cmp tr.diff td:first-child{background:var(--diff-bg); color:var(--diff-ink); box-shadow:inset 4px 0 0 var(--diff-line)}
-.cmp tr.diff td{background:var(--diff-bg)}
+.cmp td{font-family:var(--mono); font-size:12px; white-space:normal; min-width:110px}
+/* 差のある行。色だけに頼らず、行見出しの左の帯と ≠ の印でも示す */
 .cmp tr.diff{box-shadow:inset 0 0 0 1px var(--diff-line)}
-.cmp tr.grp th,.cmp tr.grp td{text-align:left; background:#20293a; color:#fff; font-weight:700; font-size:11px; letter-spacing:.06em; position:sticky; left:0}
-.cmp td{font-family:var(--mono); font-size:12px; white-space:nowrap}
-.cmp .wrapper{overflow-x:auto}
+.cmp tr.diff td{background:var(--diff-bg)}
+.cmp tr.diff th[scope=row],.cmp tr.diff td:first-child{background:var(--diff-bg); color:var(--diff-ink); box-shadow:inset 4px 0 0 var(--diff-line)}
+.diff-sign{display:inline-block; width:1.1em; font-weight:700; color:var(--diff-ink)}
+.cmp tr.grp th,.cmp tr.grp td{text-align:left; background:var(--chrome); color:#fff; font-weight:700; font-size:11px; letter-spacing:.06em; position:sticky; left:0}
+.cmp.hist th,.cmp.hist td{position:static}
 .legend{font-size:11.5px; color:var(--muted); padding:9px 14px; display:flex; gap:16px; align-items:center; border-top:1px solid var(--line)}
 .swatch{display:inline-block; width:11px; height:11px; background:var(--diff-bg); border:1px solid var(--diff-line); vertical-align:-1px; margin-right:5px}
-.empty{padding:40px; text-align:center; color:var(--sub)}
-/* ---------- 実装で追加 ---------- */
-nav button:disabled{color:#b3bac5; cursor:default; background:none}
-input:disabled,select:disabled{background:#f3f5f8; color:var(--sub)}
-button.btn:disabled{opacity:.5; cursor:default}
-button.btn.primary:disabled:hover{background:var(--accent)}
-.dirty-mark{font-size:11px; color:var(--ok); font-weight:700; margin-left:8px}
-.hint{font-size:11.5px; color:var(--sub); padding:10px 0}
+
+/* ---------- dialogs / toast ---------- */
 dialog{border:1px solid var(--line-strong); border-radius:6px; padding:0; width:min(440px, calc(100vw - 32px)); color:var(--ink)}
+dialog.wide{width:min(900px, calc(100vw - 32px))}
 dialog::backdrop{background:rgba(20,28,40,.35)}
-dialog h2{margin:0; font-size:13px; padding:10px 14px; border-bottom:1px solid var(--line); background:#fafbfc}
+dialog h2{margin:0; font-size:13px; padding:10px 14px; border-bottom:1px solid var(--line); background:var(--panel-head)}
 dialog .body{padding:14px; display:flex; flex-direction:column; gap:10px}
-dialog .body input,dialog .body select{width:100%}
+dialog.wide .body{max-height:70vh; overflow:auto}
+dialog .body input:not([type=checkbox]),dialog .body select{width:100%}
 dialog .actions{margin:0; padding:10px 14px; justify-content:flex-end}
 #toast{
-  position:fixed; right:18px; bottom:18px; background:#20293a; color:#fff;
+  position:fixed; right:18px; bottom:18px; background:var(--chrome); color:#fff;
   padding:9px 16px; border-radius:5px; font-size:12.5px; opacity:0; transition:opacity .2s;
   pointer-events:none;
 }
 #toast.show{opacity:1}
+
+/* ---------- responsive（狭い画面） ---------- */
 @media (max-width: 760px){
   .cols{grid-template-columns:1fr}
   .w-xl,.w-lg{width:100%}
@@ -148,58 +209,12 @@ dialog .actions{margin:0; padding:10px 14px; justify-content:flex-end}
   .summary{flex-wrap:wrap}
   .summary div{flex:1 1 45%}
 }
-a.btn{display:inline-block; text-decoration:none; font-family:inherit; font-size:12px; padding:6px 13px; border-radius:4px; border:1px solid var(--line-strong); background:#fff; color:var(--ink)}
-a.btn:hover{background:#f2f5f9}
-tr.clickable{cursor:pointer}
-.wrapper{overflow-x:auto}
-.cmp td{white-space:normal; min-width:110px}
-button.list-item{display:block; width:100%; text-align:left; background:none; border:0; border-bottom:1px solid var(--line); font:inherit; color:inherit}
-button.list-item:focus-visible,button.link:focus-visible{outline:2px solid var(--accent); outline-offset:-2px}
-dialog.wide{width:min(900px, calc(100vw - 32px))}
-.history{margin-top:16px}
-.history li{margin:3px 0}
-button.link:disabled,button.del:disabled{color:var(--sub); border-color:var(--line); background:none; cursor:default; opacity:.6}
-dialog.wide .body{max-height:70vh; overflow:auto}
-[hidden]{display:none !important}
 
-/* ---------- 3回目のレビュー対応 ---------- */
-.req{color:var(--ng); font-weight:700}
-.warn{background:var(--ok-bg); border-left:3px solid var(--ok); color:var(--ok); padding:8px 11px; margin-top:12px; border-radius:0 4px 4px 0; font-size:12px; font-weight:600}
-.filters .warn{margin-top:0; align-self:center}
-td.outlier input{border-color:var(--ok); background:var(--ok-bg)}
-tr.changed td{background:var(--diff-bg)}
-.est{font-size:10px; font-weight:600; color:var(--ok); margin-left:4px}
-.caution{font-size:11px; color:var(--ng); font-weight:600}
-.lock-tag{font-size:11px; font-weight:600; color:var(--ok); margin-left:10px; letter-spacing:0}
-.tag.count{background:var(--accent-soft); color:var(--accent)}
-button.btn.danger{color:var(--ng); border-color:#e8b4b0}
-button.btn.danger:hover{background:var(--ng-bg)}
-button.code-link{font-family:var(--mono); font-weight:600; font-size:12.5px; padding:0}
-table.weigh .lot-col{min-width:90px; width:110px}
-fieldset.judge{border:0; margin:0; padding:0; display:flex; gap:14px; align-items:center; flex-wrap:wrap}
-fieldset.judge legend{font-size:11px; color:var(--muted); font-weight:600; padding:0; margin-bottom:4px; width:100%}
-fieldset.judge label{font-weight:400; color:var(--ink); font-size:13px}
-fieldset.judge label.muted{color:var(--muted)}
-label.check{font-size:12px; display:flex; gap:6px; align-items:center}
-tr.archived td{color:var(--sub)}
-.sr-only{position:absolute; width:1px; height:1px; overflow:hidden; clip:rect(0 0 0 0); white-space:nowrap}
-.cmp.hist th, .cmp.hist td{position:static}
-body.loading main{opacity:.5; pointer-events:none}
-
-/* ---------- 4回目のレビュー対応 ---------- */
-/* 差のある行の印（色だけに頼らない） */
-.diff-sign{display:inline-block; width:1.1em; font-weight:700; color:var(--diff-ink)}
-/* 数値として読めない入力（「4e」など。common.js が付ける）。保存の前にも止める */
-input.bad{border-color:var(--ng); background:var(--ng-bg)}
-.caution.block{display:block}
-/* 一覧のチェック列は、列全体を押せる */
-td.sel{cursor:default; text-align:center}
-td.sel input{width:18px; height:18px; vertical-align:middle}
-/* 手袋・タブレット（指で操作する端末）では、押せる所と入力欄を大きくする */
+/* ---------- touch（手袋・タブレットなど指で操作する端末）: 押せる所と入力欄を大きくする ---------- */
 @media (pointer: coarse){
   input,select{min-height:40px; font-size:15px}
   input[type=checkbox],input[type=radio]{width:24px; height:24px; min-height:0}
-  button.btn,a.btn{min-height:44px; padding:10px 16px; font-size:14px}
+  button.btn{min-height:44px; padding:10px 16px; font-size:14px}
   button.link{min-height:40px; padding:8px 10px; font-size:14px}
   button.del{min-height:40px; padding:8px 14px; font-size:13px}
   nav button{padding:14px 18px; font-size:14px}
@@ -207,4 +222,3 @@ td.sel input{width:18px; height:18px; vertical-align:middle}
   td.sel input{width:24px; height:24px}
   fieldset.judge label{display:flex; align-items:center; gap:6px; min-height:44px; font-size:15px}
 }
-body:not(.loading) #loadingNote{display:none}

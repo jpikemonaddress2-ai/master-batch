@@ -183,9 +183,37 @@ test('比較表の CSV: 作成日の順に並べ、削除済みのサンプル�
   const early = sample({ made_on: '2026-10-02', screw_rpm: 200 });
   const gone = sample();
   store.deleteSample(gone.id, { changed_by: 'A', version: gone.version });
-  const { samples, csv } = store.compareCsv([late.id, gone.id, early.id]);
+  const { samples, skipped, csv } = store.compareCsv([late.id, gone.id, early.id]);
   assert.deepEqual(samples.map(s => s.id).sort(), [early.id, late.id].sort());
+  assert.equal(skipped, 1);
   const header = csv.replace('\ufeff', '').split('\r\n')[0];
   assert.equal(header, `"区分","項目","単位","差","${early.code}","${late.code}"`);
   assert.throws(() => store.compareCsv([gone.id]), e => e.status === 404);
+});
+
+test('配合: 使用停止の原料は新規・複製では組み込めない。保存済みの組成に元からあれば名前は直せる', () => {
+  const { mb, resin, recipe } = setup();
+  store.updateMaterial(mb.id, { ...mb, archived: true });
+  const input = { code: uniq('MB'), name: '複製', base_material_id: resin.id, default_qty_g: 1000,
+    items: [{ material_id: mb.id, target_active_pct: 2 }] };
+  assert.throws(() => store.saveRecipe(input), e => e.status === 400 && e.message.includes(mb.name));
+  const r = store.getRecipe(recipe.id);
+  assert.equal(store.saveRecipe({ ...r, name: '改名', changed_by: 'A' }, r.id).name, '改名');
+
+  // 保存済みの配合に、使用停止の原料を新しく足すのも不可
+  const other = setup();
+  const r2 = store.getRecipe(other.recipe.id);
+  assert.throws(() => store.saveRecipe({ ...r2, items: [...r2.items, { material_id: mb.id, target_active_pct: 1 }], changed_by: 'A' }, r2.id),
+    e => e.status === 400);
+});
+
+test('配合: 使用停止のベース樹脂は新しく使えない。元から使っている配合は名前を直せる', () => {
+  const { resin, recipe } = setup();
+  store.updateMaterial(resin.id, { ...resin, archived: true });
+  const r = store.getRecipe(recipe.id);
+  assert.equal(store.saveRecipe({ ...r, name: '改名', changed_by: 'A' }, r.id).name, '改名');
+  assert.throws(() => store.saveRecipe({ ...r, code: uniq('MB') }), e => e.status === 400 && e.message.includes(resin.name));
+  const other = setup();
+  const r2 = store.getRecipe(other.recipe.id);
+  assert.throws(() => store.saveRecipe({ ...r2, base_material_id: resin.id, changed_by: 'A' }, r2.id), e => e.status === 400);
 });

@@ -63,6 +63,64 @@ export async function api(method, path, body) {
   return data;
 }
 
+// Content-Disposition からファイル名を取り出す（UTF-8 の filename* を優先）
+// 保存名に使えない文字（パスの区切り・制御文字など）は _ にする
+export function filenameOf(cd) {
+  let name = /filename="([^"]+)"/i.exec(cd ?? '')?.[1] ?? '';
+  const utf8 = /filename\*=UTF-8''([^;]+)/i.exec(cd ?? '');
+  if (utf8) {
+    try { name = decodeURIComponent(utf8[1]); } catch { /* 壊れていれば ASCII の名前を使う */ }
+  }
+  name = name.replace(/[\\/:*?"<>|\x00-\x1f\x7f]/g, '_').replace(/^\.+/, '');
+  return name || 'export.csv';
+}
+
+/**
+ * CSV をダウンロードする。<a download> で直接開くと、失敗したとき（他の人が削除した後など）に
+ * ブラウザのダウンロード欄に「失敗」と出るだけで理由が分からないので、取得してから保存させる。
+ * @returns {Promise<{skipped:number}>} skipped: 削除されていて出せなかったサンプルの件数（比較の CSV）
+ * @throws 取得に失敗したら、サーバーのエラー文を持つ Error
+ */
+export async function downloadCsv(url) {
+  const res = await fetch(url);
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error || `通信エラー (${res.status})`);
+  }
+  const href = URL.createObjectURL(await res.blob());
+  try {
+    const a = Object.assign(document.createElement('a'), { href, download: filenameOf(res.headers.get('Content-Disposition')) });
+    document.body.append(a);
+    a.click();
+    a.remove();
+  } finally {
+    setTimeout(() => URL.revokeObjectURL(href), 10_000);
+  }
+  return { skipped: Number(res.headers.get('X-Skipped-Samples')) || 0 };
+}
+
+/**
+ * ボタンを押してから終わるまで、ボタンを止めて「作成中…」と出す（二度押しで同じファイルを2つ保存させない）。
+ * 取得に時間がかかっても、押したことが伝わるようにする
+ */
+export async function whileBusy(btn, label, fn) {
+  if (btn.disabled) return;
+  const text = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = label;
+  btn.setAttribute('aria-busy', 'true');
+  try {
+    return await fn();
+  } finally {
+    btn.disabled = false;
+    btn.textContent = text;
+    btn.removeAttribute('aria-busy');
+  }
+}
+
+/** 注意（橙）。エラーではないが知らせたいこと */
+export const warnBox = msg => msg ? `<div class="warn">${esc(msg)}</div>` : '';
+
 /**
  * エラー表示に回復用のボタンを1つ付けて box に出す。
  * 「他の人が先に保存しました」のように、読み直す以外に抜け道がないエラーで使う。

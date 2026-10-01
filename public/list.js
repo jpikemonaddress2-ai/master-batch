@@ -1,6 +1,6 @@
 // 画面3: サンプル一覧
 import { JUDGEMENTS } from './fields.mjs';
-import { $, esc, api, state, showTab, toast } from './common.js';
+import { $, esc, api, state, showTab, toast, alertBox, downloadCsv, whileBusy } from './common.js';
 import { openSample, showSampleDiff } from './sample.js';
 import { drawCompare } from './compare.js';
 
@@ -8,6 +8,7 @@ const FILTERS = { fRecipe: 'recipe', fFrom: 'from', fTo: 'to', fJudge: 'judgemen
 
 let rows = [];
 let total = 0;
+let shownQuery = '';   // いま表に出している絞り込み条件（CSV に使う）
 let seq = 0;   // 絞り込みの要求の通し番号。遅れて返ってきた古い結果で上書きしないため
 export const selected = new Set();
 
@@ -25,6 +26,7 @@ async function refresh() {
   $('#fRangeWarn').hidden = !(from && to && from > to);
   const q = query();
   const my = ++seq;
+  $('#lAlert').innerHTML = '';   // 前の CSV のエラーは、条件を変えたら消す
   $('#lRows').setAttribute('aria-busy', 'true');
   $('#lCount').textContent = '読み込み中…';
   let result, count;
@@ -41,7 +43,7 @@ async function refresh() {
   if (my !== seq) return;
   rows = result;
   total = count.count;
-  $('#csv').href = `/api/samples.csv?${q}`;
+  shownQuery = q;
   draw();
 }
 
@@ -105,6 +107,15 @@ for (const id of Object.keys(FILTERS)) {
 $('#fText').addEventListener('compositionend', () => {
   clearTimeout(timer);
   timer = setTimeout(refresh, 200);
+});
+
+$('#csv').onclick = () => whileBusy($('#csv'), 'CSV を作成中…', async () => {
+  $('#lAlert').innerHTML = '';
+  try {
+    await downloadCsv(`/api/samples.csv?${shownQuery}`);
+  } catch (e) {
+    $('#lAlert').innerHTML = alertBox(`CSV をエクスポートできませんでした: ${e.message}`);
+  }
 });
 
 $('#fClear').onclick = () => {

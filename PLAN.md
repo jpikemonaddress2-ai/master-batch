@@ -43,6 +43,7 @@ C:\Users\jpike\src\master-batch\
   start.bat            起動（node server.mjs → ブラウザを開く）
   server.mjs           node:http。静的配信 + /api/* のJSON
   db.mjs               node:sqlite。スキーマ作成 + クエリ関数
+  http-util.mjs        ステータス付きの例外、URL の id の検証、ダウンロードのファイル名（db.mjs と server.mjs で共用）
   config.mjs           BARREL_ZONES など運用定数
   data/masterbatch.db  DB本体（gitignore、バックアップ対象）
   public/
