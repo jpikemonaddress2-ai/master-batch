@@ -1,0 +1,617 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>マスターバッチ 配合・造粒条件管理（モック）</title>
+<style>
+:root{
+  --bg:#eef1f5; --panel:#fff; --line:#d5dae2; --line-strong:#b6bfcc;
+  --ink:#1b2430; --muted:#67717f; --sub:#8a94a3;
+  --accent:#1f5fd0; --accent-soft:#e8f0fe;
+  --good:#146c43; --good-bg:#e4f4ea;
+  --ok:#8a5a00;  --ok-bg:#fdf3e0;
+  --ng:#b02a1f;  --ng-bg:#fdeceb;
+  --diff-bg:#fff6da; --diff-line:#e6c65c;
+  --mono:"Consolas","SF Mono","Roboto Mono",monospace;
+}
+*{box-sizing:border-box}
+body{
+  margin:0; background:var(--bg); color:var(--ink);
+  font-family:"Segoe UI","Yu Gothic UI",Meiryo,sans-serif;
+  font-size:13px; line-height:1.55;
+}
+/* ---------- header / nav ---------- */
+header{
+  background:#20293a; color:#fff; padding:10px 18px;
+  display:flex; align-items:baseline; gap:12px;
+}
+header h1{font-size:15px; margin:0; font-weight:600; letter-spacing:.02em}
+.badge{
+  font-size:10px; background:#f0b429; color:#3a2c00; padding:2px 7px;
+  border-radius:3px; font-weight:700;
+}
+header .env{margin-left:auto; font-size:11px; color:#9aa5b8}
+nav{background:var(--panel); border-bottom:1px solid var(--line-strong); padding:0 12px; display:flex; gap:2px}
+nav button{
+  background:none; border:0; border-bottom:2px solid transparent;
+  padding:10px 16px; font-size:13px; color:var(--muted); cursor:pointer;
+  font-family:inherit;
+}
+nav button:hover{color:var(--ink); background:#f6f8fa}
+nav button.on{color:var(--accent); border-bottom-color:var(--accent); font-weight:600}
+main{padding:16px; max-width:1400px}
+section[hidden]{display:none}
+/* ---------- layout ---------- */
+.cols{display:grid; grid-template-columns:260px 1fr; gap:16px; align-items:start}
+.panel{background:var(--panel); border:1px solid var(--line); border-radius:6px}
+.panel > h2{
+  margin:0; font-size:12px; font-weight:700; color:var(--muted);
+  padding:9px 14px; border-bottom:1px solid var(--line); letter-spacing:.06em;
+  background:#fafbfc; border-radius:6px 6px 0 0;
+}
+.panel .body{padding:14px}
+.row{display:flex; gap:14px; flex-wrap:wrap; align-items:flex-end}
+.field{display:flex; flex-direction:column; gap:3px}
+.field label{font-size:11px; color:var(--muted); font-weight:600}
+.w-sm{width:96px} .w-md{width:150px} .w-lg{width:240px} .w-xl{width:320px}
+/* ---------- controls ---------- */
+input,select,textarea{
+  font-family:inherit; font-size:13px; color:var(--ink); background:#fff;
+  border:1px solid var(--line-strong); border-radius:4px; padding:5px 7px;
+}
+input:focus,select:focus,textarea:focus{outline:2px solid var(--accent-soft); border-color:var(--accent)}
+input[type=number]{font-family:var(--mono); text-align:right}
+textarea{resize:vertical; min-height:52px; width:100%}
+button.btn{
+  font-family:inherit; font-size:12px; padding:6px 13px; border-radius:4px;
+  border:1px solid var(--line-strong); background:#fff; color:var(--ink); cursor:pointer;
+}
+button.btn:hover{background:#f2f5f9}
+button.primary{background:var(--accent); border-color:var(--accent); color:#fff}
+button.primary:hover{background:#1a51b0}
+button.link{background:none;border:0;color:var(--accent);cursor:pointer;font-family:inherit;font-size:12px;padding:2px 4px}
+button.del{color:var(--ng); border-color:#e8b4b0; background:#fff; padding:3px 8px; font-size:11px; border-radius:3px; cursor:pointer; font-family:inherit}
+.actions{display:flex; gap:8px; margin-top:14px; padding-top:12px; border-top:1px solid var(--line)}
+/* ---------- tables ---------- */
+table{border-collapse:collapse; width:100%; font-size:12.5px}
+th,td{border-bottom:1px solid var(--line); padding:6px 9px; text-align:left; vertical-align:middle}
+thead th{
+  background:#fafbfc; font-size:11px; color:var(--muted); font-weight:700;
+  border-bottom:1px solid var(--line-strong); white-space:nowrap;
+}
+td.num,th.num{text-align:right; font-family:var(--mono)}
+tbody tr:hover{background:#f7f9fc}
+.list-item{
+  padding:9px 14px; border-bottom:1px solid var(--line); cursor:pointer;
+}
+.list-item:hover{background:#f4f7fb}
+.list-item.on{background:var(--accent-soft); box-shadow:inset 3px 0 0 var(--accent)}
+.list-item .code{font-family:var(--mono); font-size:11px; color:var(--accent); font-weight:600}
+.list-item .nm{display:block}
+.list-item .meta{font-size:11px; color:var(--sub)}
+/* ---------- misc ---------- */
+.tag{display:inline-block; padding:1px 8px; border-radius:10px; font-size:11px; font-weight:700; white-space:nowrap}
+.tag.good{background:var(--good-bg); color:var(--good)}
+.tag.ok{background:var(--ok-bg); color:var(--ok)}
+.tag.ng{background:var(--ng-bg); color:var(--ng)}
+.summary{
+  display:flex; gap:0; margin-top:14px; border:1px solid var(--line-strong);
+  border-radius:5px; overflow:hidden; background:#fbfcfd;
+}
+.summary div{padding:9px 16px; border-right:1px solid var(--line); flex:1}
+.summary div:last-child{border-right:0}
+.summary .k{font-size:11px; color:var(--muted); font-weight:600}
+.summary .v{font-family:var(--mono); font-size:17px; font-weight:600}
+.summary .v small{font-size:11px; color:var(--sub); font-weight:400; margin-left:2px}
+.note{font-size:11.5px; color:var(--muted); background:#f7f9fb; border-left:3px solid var(--line-strong); padding:8px 11px; margin-top:12px; border-radius:0 4px 4px 0}
+.alert{background:var(--ng-bg); border-left:3px solid var(--ng); color:var(--ng); font-weight:600; padding:8px 11px; margin-top:12px; border-radius:0 4px 4px 0; font-size:12px}
+.delta.plus{color:var(--ng)} .delta.minus{color:var(--accent)} .delta.zero{color:var(--sub)}
+.zones{display:grid; grid-template-columns:repeat(9,1fr); gap:6px; max-width:640px}
+.zones .field label{text-align:center; font-family:var(--mono)}
+.zones input{width:100%; padding:4px}
+.sub-h{font-size:11px; font-weight:700; color:var(--muted); letter-spacing:.06em; margin:16px 0 8px; padding-bottom:5px; border-bottom:1px solid var(--line)}
+.sub-h:first-child{margin-top:0}
+.filters{display:flex; gap:12px; flex-wrap:wrap; align-items:flex-end; padding:12px 14px; border-bottom:1px solid var(--line); background:#fafbfc}
+.bar{display:flex; gap:8px; align-items:center; padding:10px 14px; border-bottom:1px solid var(--line)}
+.bar .count{font-size:12px; color:var(--muted); margin-right:auto}
+/* compare */
+.cmp th:first-child,.cmp td:first-child{
+  position:sticky; left:0; background:#fafbfc; font-weight:600; color:var(--muted);
+  border-right:1px solid var(--line-strong); width:190px; font-size:11.5px;
+}
+.cmp tr.diff td:first-child{background:var(--diff-bg); color:#6b5200}
+.cmp tr.diff td{background:var(--diff-bg)}
+.cmp tr.diff{box-shadow:inset 0 0 0 1px var(--diff-line)}
+.cmp tr.grp td{background:#20293a; color:#fff; font-weight:700; font-size:11px; letter-spacing:.06em; position:sticky; left:0}
+.cmp td{font-family:var(--mono); font-size:12px; white-space:nowrap}
+.cmp .wrapper{overflow-x:auto}
+.legend{font-size:11.5px; color:var(--muted); padding:9px 14px; display:flex; gap:16px; align-items:center; border-top:1px solid var(--line)}
+.swatch{display:inline-block; width:11px; height:11px; background:var(--diff-bg); border:1px solid var(--diff-line); vertical-align:-1px; margin-right:5px}
+.empty{padding:40px; text-align:center; color:var(--sub)}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>マスターバッチ 配合・造粒条件管理</h1>
+  <span class="badge">モック</span>
+  <span class="env">表示中のデータはすべてダミーです</span>
+</header>
+
+<nav>
+  <button data-tab="recipe" class="on">配合</button>
+  <button data-tab="sample">サンプル記録</button>
+  <button data-tab="list">サンプル一覧</button>
+  <button data-tab="compare">比較</button>
+</nav>
+
+<main>
+
+<!-- ============ 1. 配合 ============ -->
+<section id="tab-recipe">
+  <div class="cols">
+    <div class="panel">
+      <h2>配合一覧</h2>
+      <div id="recipeList"></div>
+      <div style="padding:10px 14px"><button class="btn" style="width:100%">＋ 新規配合</button></div>
+    </div>
+
+    <div class="panel">
+      <h2>配合の編集</h2>
+      <div class="body">
+        <div class="row">
+          <div class="field"><label>配合コード</label><input class="w-md" id="rCode"></div>
+          <div class="field"><label>配合名</label><input class="w-xl" id="rName"></div>
+          <div class="field"><label>ベース樹脂</label><select class="w-lg" id="rBase"></select></div>
+        </div>
+
+        <div class="sub-h">添加剤（狙い濃度は「有効成分としての wt%」で入力）</div>
+        <table>
+          <thead><tr>
+            <th>原料</th><th class="num" style="width:110px">有効成分 %</th>
+            <th class="num" style="width:130px">狙い濃度 wt%</th>
+            <th class="num" style="width:130px">仕込み量 g</th><th style="width:50px"></th>
+          </tr></thead>
+          <tbody id="rItems"></tbody>
+        </table>
+        <div style="margin-top:8px"><button class="link" id="addItem">＋ 添加剤を追加</button>
+          <button class="link" id="addMat">＋ 原料マスタに登録</button></div>
+
+        <div class="row" style="margin-top:16px">
+          <div class="field"><label>作成量 (g)</label><input type="number" class="w-md" id="rQty" value="1000" step="1"></div>
+        </div>
+
+        <div class="summary" id="rSummary"></div>
+        <div id="rAlert"></div>
+
+        <div class="note">
+          既製マスターバッチを使う場合、そのキャリア樹脂も製品に入るため、ベース樹脂量はその分減ります（上の計算に反映済み）。
+          キャリア樹脂の樹脂種がベース樹脂と異なる場合は、樹脂組成が混ざる点にご注意ください。
+        </div>
+
+        <div class="actions">
+          <button class="btn primary">保存</button>
+          <button class="btn">この配合でサンプルを作る</button>
+          <button class="btn" style="margin-left:auto">複製</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ 2. サンプル記録 ============ -->
+<section id="tab-sample" hidden>
+  <div class="panel">
+    <h2>サンプル記録</h2>
+    <div class="body">
+      <div class="row">
+        <div class="field"><label>配合</label><select class="w-xl" id="sRecipe"></select></div>
+        <div class="field"><label>サンプル番号</label><input class="w-md" id="sCode" value="S-2026-012"></div>
+        <div class="field"><label>作成日</label><input type="date" class="w-md" id="sDate" value="2026-07-22"></div>
+        <div class="field"><label>作成量 (g)</label><input type="number" class="w-sm" id="sQty" value="1000"></div>
+      </div>
+
+      <div class="sub-h">秤量（狙い量に対して、実際に秤った値を入力）</div>
+      <table>
+        <thead><tr>
+          <th>原料</th><th class="num">狙い濃度 wt%</th><th class="num">有効成分 %</th>
+          <th class="num">狙い量 g</th><th class="num" style="width:120px">実秤量 g</th>
+          <th class="num">実濃度 wt%</th><th class="num">狙い比</th>
+        </tr></thead>
+        <tbody id="sWeigh"></tbody>
+      </table>
+      <div class="summary" id="sSummary"></div>
+
+      <div class="sub-h">造粒条件 — バレル温度 (℃)</div>
+      <div class="zones" id="sZones"></div>
+
+      <div class="sub-h">造粒条件 — 運転</div>
+      <div class="row">
+        <div class="field"><label>スクリュー回転数 (rpm)</label><input type="number" class="w-sm" value="300"></div>
+        <div class="field"><label>吐出量 (kg/h)</label><input type="number" class="w-sm" value="5.0" step="0.1"></div>
+        <div class="field"><label>トルク (%)</label><input type="number" class="w-sm" value="55"></div>
+        <div class="field"><label>樹脂圧 (MPa)</label><input type="number" class="w-sm" value="2.8" step="0.1"></div>
+        <div class="field"><label>真空度 (kPa)</label><input type="number" class="w-sm" value="-80"></div>
+      </div>
+      <div class="row" style="margin-top:10px">
+        <div class="field"><label>冷却水温 (℃)</label><input type="number" class="w-sm" value="40"></div>
+        <div class="field"><label>ペレタイザ (rpm)</label><input type="number" class="w-sm" value="185"></div>
+        <div class="field"><label>予備乾燥 温度 (℃)</label><input type="number" class="w-sm" value="80"></div>
+        <div class="field"><label>予備乾燥 時間 (h)</label><input type="number" class="w-sm" value="4"></div>
+      </div>
+
+      <div class="sub-h">造粒条件 — 自由項目</div>
+      <table style="max-width:720px">
+        <thead><tr><th>項目名</th><th style="width:180px">値</th><th style="width:110px">単位</th><th style="width:50px"></th></tr></thead>
+        <tbody>
+          <tr><td><input value="スクリュー構成" style="width:100%"></td><td><input value="標準ニーディング" style="width:100%"></td><td><input style="width:100%"></td><td><button class="del">削除</button></td></tr>
+          <tr><td><input value="フィーダー種別" style="width:100%"></td><td><input value="重量式" style="width:100%"></td><td><input style="width:100%"></td><td><button class="del">削除</button></td></tr>
+        </tbody>
+      </table>
+      <div style="margin-top:8px"><button class="link">＋ 項目を追加</button></div>
+
+      <div class="sub-h">評価</div>
+      <div class="row">
+        <div class="field"><label>総合判定</label>
+          <div style="display:flex; gap:14px; padding-top:4px">
+            <label style="font-weight:400;color:var(--ink)"><input type="radio" name="jd" checked> 良</label>
+            <label style="font-weight:400;color:var(--ink)"><input type="radio" name="jd"> 可</label>
+            <label style="font-weight:400;color:var(--ink)"><input type="radio" name="jd"> 不可</label>
+          </div>
+        </div>
+      </div>
+      <div class="field" style="margin-top:12px; max-width:720px">
+        <label>外観・所見</label>
+        <textarea>ストランド安定。脈動なし。ペレット長そろい良好、透明感あり。</textarea>
+      </div>
+
+      <div class="sub-h">測定値（自由項目）</div>
+      <table style="max-width:720px">
+        <thead><tr><th>項目名</th><th style="width:140px">値</th><th style="width:110px">単位</th><th style="width:50px"></th></tr></thead>
+        <tbody>
+          <tr><td><input value="MFR" style="width:100%"></td><td><input value="12.1" style="width:100%"></td><td><input value="g/10min" style="width:100%"></td><td><button class="del">削除</button></td></tr>
+          <tr><td><input value="色調 b値" style="width:100%"></td><td><input value="1.6" style="width:100%"></td><td><input value="－" style="width:100%"></td><td><button class="del">削除</button></td></tr>
+        </tbody>
+      </table>
+      <div style="margin-top:8px"><button class="link">＋ 項目を追加</button></div>
+
+      <div class="actions">
+        <button class="btn primary">保存</button>
+        <button class="btn">保存して続けて新規</button>
+        <button class="btn" style="margin-left:auto">削除</button>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ 3. サンプル一覧 ============ -->
+<section id="tab-list" hidden>
+  <div class="panel">
+    <h2>サンプル一覧</h2>
+    <div class="filters">
+      <div class="field"><label>配合</label><select class="w-lg" id="fRecipe"><option value="">すべて</option></select></div>
+      <div class="field"><label>作成日 From</label><input type="date" class="w-md" id="fFrom"></div>
+      <div class="field"><label>To</label><input type="date" class="w-md" id="fTo"></div>
+      <div class="field"><label>判定</label><select class="w-sm" id="fJudge">
+        <option value="">すべて</option><option value="good">良</option><option value="ok">可</option><option value="ng">不可</option>
+      </select></div>
+      <div class="field"><label>フリーテキスト</label><input class="w-lg" id="fText" placeholder="サンプル番号・所見・メモ"></div>
+      <button class="btn" id="fClear">条件クリア</button>
+    </div>
+    <div class="bar">
+      <span class="count" id="lCount"></span>
+      <button class="btn primary" id="goCompare">選択したサンプルを比較</button>
+      <button class="btn">CSVエクスポート</button>
+    </div>
+    <table>
+      <thead><tr>
+        <th style="width:34px"><input type="checkbox" id="chkAll"></th>
+        <th>サンプル番号</th><th>作成日</th><th>配合</th>
+        <th class="num">総量 g</th><th class="num">回転数</th><th class="num">ダイ温度</th>
+        <th class="num">トルク</th><th>判定</th><th>外観・所見</th>
+      </tr></thead>
+      <tbody id="lRows"></tbody>
+    </table>
+  </div>
+</section>
+
+<!-- ============ 4. 比較 ============ -->
+<section id="tab-compare" hidden>
+  <div class="panel">
+    <h2>比較</h2>
+    <div class="wrapper"><table class="cmp"><tbody id="cRows"></tbody></table></div>
+    <div class="legend"><span><span class="swatch"></span>値が揃っていない行（＝振った条件・出た差）</span></div>
+  </div>
+</section>
+
+</main>
+
+<script>
+/* ===================== ダミーデータ ===================== */
+const MATERIALS = [
+  {id:1, name:'PP ホモポリマー H700',   kind:'resin',    active:100},
+  {id:2, name:'LDPE L200',              kind:'resin',    active:100},
+  {id:3, name:'酸化防止剤 AO-1010（純品）', kind:'additive', active:100},
+  {id:4, name:'酸化防止剤MB AO-50MB',    kind:'additive', active:50},
+  {id:5, name:'ステアリン酸カルシウム',   kind:'additive', active:100},
+  {id:6, name:'帯電防止剤MB AS-20MB',    kind:'additive', active:20},
+];
+const RECIPES = [
+  {id:1, code:'MB-001', name:'PP / 酸化防止剤 2%', base:1, qty:1000,
+   items:[{mat:4, pct:2.0}]},
+  {id:2, code:'MB-002', name:'PP / 酸化防止剤 + 滑剤', base:1, qty:2000,
+   items:[{mat:3, pct:0.3},{mat:5, pct:0.2}]},
+  {id:3, code:'MB-003', name:'LDPE / 帯電防止 1.5%', base:2, qty:1500,
+   items:[{mat:6, pct:1.5}]},
+];
+const SAMPLES = [
+  {code:'S-2026-011', recipe:1, date:'2026-07-14', qty:1000,
+   barrel:[170,180,190,200,200,200,195,190], die:195, rpm:200, feed:5.0, torque:62,
+   press:3.2, vac:-80, bath:40, pel:180, dryT:80, dryH:4,
+   judge:'ok', note:'ストランドやや脈動。ペレット長にばらつき',
+   weigh:[{mat:4, pct:2.0, active:50, target:40.0, actual:40.2},
+          {mat:1, base:true, target:960.0, actual:959.8}],
+   extras:[['スクリュー構成','標準ニーディング',''],['MFR','12.4','g/10min'],['色調 b値','1.8','－']]},
+  {code:'S-2026-012', recipe:1, date:'2026-07-22', qty:1000,
+   barrel:[170,180,190,200,200,200,195,190], die:195, rpm:300, feed:5.0, torque:55,
+   press:2.8, vac:-80, bath:40, pel:185, dryT:80, dryH:4,
+   judge:'good', note:'ストランド安定。透明感良好',
+   weigh:[{mat:4, pct:2.0, active:50, target:40.0, actual:41.0},
+          {mat:1, base:true, target:960.0, actual:959.0}],
+   extras:[['スクリュー構成','標準ニーディング',''],['MFR','12.1','g/10min'],['色調 b値','1.6','－']]},
+  {code:'S-2026-013', recipe:1, date:'2026-07-29', qty:1000,
+   barrel:[170,180,190,200,205,210,205,200], die:200, rpm:400, feed:5.0, torque:48,
+   press:2.4, vac:-80, bath:40, pel:190, dryT:80, dryH:4,
+   judge:'ng', note:'樹脂焼け。黄変あり',
+   weigh:[{mat:4, pct:2.0, active:50, target:40.0, actual:39.8},
+          {mat:1, base:true, target:960.0, actual:960.2}],
+   extras:[['スクリュー構成','標準ニーディング',''],['MFR','15.8','g/10min'],['色調 b値','4.2','－']]},
+  {code:'S-2026-020', recipe:3, date:'2026-08-05', qty:1500,
+   barrel:[150,160,170,175,175,170,165,160], die:165, rpm:250, feed:6.0, torque:44,
+   press:2.0, vac:-70, bath:35, pel:200, dryT:60, dryH:3,
+   judge:'good', note:'問題なし',
+   weigh:[{mat:6, pct:1.5, active:20, target:112.5, actual:112.4},
+          {mat:2, base:true, target:1387.5, actual:1387.8}],
+   extras:[['表面抵抗率','8.2E11','Ω']]},
+];
+const ZONES = 8;
+const JUDGE = {good:['良','good'], ok:['可','ok'], ng:['不可','ng']};
+
+/* ===================== 共通 ===================== */
+const $ = s => document.querySelector(s);
+const mat = id => MATERIALS.find(m => m.id === id);
+const recipe = id => RECIPES.find(r => r.id === id);
+const fmt = (n, d=1) => (n === null || n === undefined || Number.isNaN(n)) ? '—' : Number(n).toFixed(d);
+
+/* 配合計算: 仕込み量 m = W × a / p */
+function calcCharge(totalG, items){
+  const rows = items.map(it => {
+    const m = mat(it.mat);
+    return {...it, name:m.name, active:m.active, g: m.active > 0 ? totalG * it.pct / m.active : NaN};
+  });
+  const addTotal = rows.reduce((s,r) => s + (Number.isNaN(r.g) ? 0 : r.g), 0);
+  return {rows, addTotal, baseG: totalG - addTotal, over: addTotal > totalG};
+}
+
+/* タブ切替 */
+document.querySelectorAll('nav button').forEach(b => b.onclick = () => {
+  document.querySelectorAll('nav button').forEach(x => x.classList.toggle('on', x === b));
+  ['recipe','sample','list','compare'].forEach(t => $('#tab-' + t).hidden = (t !== b.dataset.tab));
+});
+
+/* ===================== 1. 配合 ===================== */
+let curRecipe = 1;
+
+function drawRecipeList(){
+  $('#recipeList').innerHTML = RECIPES.map(r => `
+    <div class="list-item ${r.id===curRecipe?'on':''}" data-id="${r.id}">
+      <span class="code">${r.code}</span>
+      <span class="nm">${r.name}</span>
+      <span class="meta">添加剤 ${r.items.length} 種 / 基準 ${r.qty.toLocaleString()} g</span>
+    </div>`).join('');
+  $('#recipeList').querySelectorAll('.list-item').forEach(el => el.onclick = () => {
+    curRecipe = Number(el.dataset.id); drawRecipeList(); loadRecipe();
+  });
+}
+
+function loadRecipe(){
+  const r = recipe(curRecipe);
+  $('#rCode').value = r.code; $('#rName').value = r.name; $('#rQty').value = r.qty;
+  $('#rBase').innerHTML = MATERIALS.filter(m => m.kind === 'resin')
+    .map(m => `<option value="${m.id}" ${m.id===r.base?'selected':''}>${m.name}</option>`).join('');
+  drawItems();
+}
+
+function drawItems(){
+  const r = recipe(curRecipe);
+  const opts = sel => MATERIALS.filter(m => m.kind === 'additive')
+    .map(m => `<option value="${m.id}" ${m.id===sel?'selected':''}>${m.name}</option>`).join('');
+  $('#rItems').innerHTML = r.items.map((it,i) => `
+    <tr>
+      <td><select style="width:100%" data-i="${i}" class="itMat">${opts(it.mat)}</select></td>
+      <td class="num" data-active="${i}">${fmt(mat(it.mat).active,0)}</td>
+      <td class="num"><input type="number" step="0.01" style="width:100%" value="${it.pct}" data-i="${i}" class="itPct"></td>
+      <td class="num" data-g="${i}"></td>
+      <td><button class="del" data-i="${i}">削除</button></td>
+    </tr>`).join('');
+  $('#rItems').querySelectorAll('.itPct').forEach(el => el.oninput = e => {
+    r.items[e.target.dataset.i].pct = parseFloat(e.target.value) || 0; calcRecipe();
+  });
+  $('#rItems').querySelectorAll('.itMat').forEach(el => el.onchange = e => {
+    r.items[e.target.dataset.i].mat = Number(e.target.value); drawItems();
+  });
+  $('#rItems').querySelectorAll('.del').forEach(el => el.onclick = e => {
+    r.items.splice(Number(e.target.dataset.i), 1); drawItems();
+  });
+  calcRecipe();
+}
+
+function calcRecipe(){
+  const r = recipe(curRecipe);
+  const W = parseFloat($('#rQty').value) || 0;
+  const c = calcCharge(W, r.items);
+  c.rows.forEach((row,i) => {
+    $(`#rItems [data-g="${i}"]`).textContent = fmt(row.g, 2);
+    $(`#rItems [data-active="${i}"]`).textContent = fmt(row.active, 0);
+  });
+  $('#rSummary').innerHTML = `
+    <div><div class="k">ベース樹脂</div><div class="v">${fmt(c.baseG,1)}<small>g</small></div></div>
+    <div><div class="k">添加剤 合計</div><div class="v">${fmt(c.addTotal,1)}<small>g</small></div></div>
+    <div><div class="k">総量</div><div class="v">${fmt(W,1)}<small>g</small></div></div>
+    <div><div class="k">添加剤 比率</div><div class="v">${fmt(W?c.addTotal/W*100:0,2)}<small>wt%</small></div></div>`;
+  $('#rAlert').innerHTML = c.over
+    ? `<div class="alert">配合過剰: 添加剤の合計 ${fmt(c.addTotal,1)} g が総量 ${fmt(W,1)} g を超えています。狙い濃度か作成量を見直してください。</div>` : '';
+}
+$('#rQty').oninput = calcRecipe;
+$('#addItem').onclick = () => { recipe(curRecipe).items.push({mat:3, pct:0.1}); drawItems(); };
+
+/* ===================== 2. サンプル記録 ===================== */
+function drawSampleTab(){
+  $('#sRecipe').innerHTML = RECIPES.map(r =>
+    `<option value="${r.id}" ${r.id===1?'selected':''}>${r.code} — ${r.name}</option>`).join('');
+  $('#sZones').innerHTML = Array.from({length:ZONES}, (_,i) =>
+    `<div class="field"><label>C${i+1}</label><input type="number" value="${[170,180,190,200,200,200,195,190][i]}"></div>`
+  ).join('') + `<div class="field"><label>ダイ</label><input type="number" value="195"></div>`;
+  drawWeigh();
+}
+
+function drawWeigh(){
+  const s = SAMPLES[1]; // S-2026-012
+  const actualTotal = s.weigh.reduce((t,w) => t + w.actual, 0);
+  $('#sWeigh').innerHTML = s.weigh.map(w => {
+    const m = mat(w.mat);
+    if (w.base) return `<tr>
+      <td>${m.name} <span style="color:var(--sub);font-size:11px">（ベース樹脂・差引）</span></td>
+      <td class="num">—</td><td class="num">—</td>
+      <td class="num">${fmt(w.target,1)}</td>
+      <td class="num"><input type="number" step="0.1" value="${w.actual}" style="width:100%"></td>
+      <td class="num">—</td><td class="num">—</td></tr>`;
+    const realPct = w.actual * w.active / actualTotal;
+    const d = realPct - w.pct;
+    const cls = Math.abs(d) < 0.005 ? 'zero' : (d > 0 ? 'plus' : 'minus');
+    return `<tr>
+      <td>${m.name}</td>
+      <td class="num">${fmt(w.pct,2)}</td><td class="num">${fmt(w.active,0)}</td>
+      <td class="num">${fmt(w.target,1)}</td>
+      <td class="num"><input type="number" step="0.1" value="${w.actual}" style="width:100%"></td>
+      <td class="num"><b>${fmt(realPct,3)}</b></td>
+      <td class="num delta ${cls}">${d>0?'+':''}${fmt(d,3)} pt</td></tr>`;
+  }).join('');
+  $('#sSummary').innerHTML = `
+    <div><div class="k">狙い総量</div><div class="v">${fmt(s.qty,1)}<small>g</small></div></div>
+    <div><div class="k">実測総量</div><div class="v">${fmt(actualTotal,1)}<small>g</small></div></div>
+    <div><div class="k">歩留まり基準差</div><div class="v">${(actualTotal-s.qty)>=0?'+':''}${fmt(actualTotal-s.qty,1)}<small>g</small></div></div>`;
+}
+
+/* ===================== 3. サンプル一覧 ===================== */
+const selected = new Set(['S-2026-011','S-2026-012','S-2026-013']);
+
+function drawList(){
+  $('#fRecipe').innerHTML = '<option value="">すべて</option>' +
+    RECIPES.map(r => `<option value="${r.id}">${r.code} — ${r.name}</option>`).join('');
+  renderRows();
+}
+
+function filtered(){
+  const rid = $('#fRecipe').value, from = $('#fFrom').value, to = $('#fTo').value;
+  const jd = $('#fJudge').value, tx = $('#fText').value.trim();
+  return SAMPLES.filter(s =>
+    (!rid || s.recipe === Number(rid)) &&
+    (!from || s.date >= from) && (!to || s.date <= to) &&
+    (!jd || s.judge === jd) &&
+    (!tx || (s.code + s.note).includes(tx)));
+}
+
+function renderRows(){
+  const rows = filtered();
+  $('#lCount').textContent = `${rows.length} 件表示 / 全 ${SAMPLES.length} 件　選択 ${selected.size} 件`;
+  $('#lRows').innerHTML = rows.length ? rows.map(s => {
+    const r = recipe(s.recipe), j = JUDGE[s.judge];
+    return `<tr>
+      <td><input type="checkbox" data-c="${s.code}" ${selected.has(s.code)?'checked':''}></td>
+      <td style="font-family:var(--mono);color:var(--accent);font-weight:600">${s.code}</td>
+      <td>${s.date}</td><td>${r.code} <span style="color:var(--sub)">${r.name}</span></td>
+      <td class="num">${s.qty.toLocaleString()}</td><td class="num">${s.rpm}</td>
+      <td class="num">${s.die}</td><td class="num">${s.torque}</td>
+      <td><span class="tag ${j[1]}">${j[0]}</span></td>
+      <td style="color:var(--muted)">${s.note}</td></tr>`;
+  }).join('') : `<tr><td colspan="10" class="empty">条件に一致するサンプルがありません</td></tr>`;
+  $('#lRows').querySelectorAll('input[data-c]').forEach(el => el.onchange = e => {
+    e.target.checked ? selected.add(e.target.dataset.c) : selected.delete(e.target.dataset.c);
+    renderRows();
+  });
+}
+['fRecipe','fFrom','fTo','fJudge','fText'].forEach(id => $('#'+id).oninput = renderRows);
+$('#fClear').onclick = () => { ['fRecipe','fFrom','fTo','fJudge','fText'].forEach(id => $('#'+id).value=''); renderRows(); };
+$('#chkAll').onchange = e => {
+  filtered().forEach(s => e.target.checked ? selected.add(s.code) : selected.delete(s.code));
+  renderRows();
+};
+$('#goCompare').onclick = () => {
+  document.querySelector('nav button[data-tab="compare"]').click();
+  drawCompare();
+};
+
+/* ===================== 4. 比較（転置表） ===================== */
+function drawCompare(){
+  const list = SAMPLES.filter(s => selected.has(s.code));
+  if (list.length < 2){
+    $('#cRows').innerHTML = `<tr><td class="empty">サンプル一覧で 2 件以上を選択してください。</td></tr>`;
+    return;
+  }
+  const out = [];
+  const group = t => out.push(`<tr class="grp"><td colspan="${list.length+1}">${t}</td></tr>`);
+  const line = (label, vals) => {
+    const diff = new Set(vals.map(v => String(v))).size > 1;
+    out.push(`<tr class="${diff?'diff':''}"><td>${label}</td>${vals.map(v=>`<td>${v}</td>`).join('')}</tr>`);
+  };
+
+  group('基本');
+  line('サンプル番号', list.map(s => s.code));
+  line('作成日',       list.map(s => s.date));
+  line('配合',         list.map(s => recipe(s.recipe).code));
+  line('作成量 (g)',   list.map(s => s.qty.toLocaleString()));
+
+  group('配合・秤量');
+  const matIds = [...new Set(list.flatMap(s => s.weigh.filter(w=>!w.base).map(w=>w.mat)))];
+  matIds.forEach(id => {
+    const get = s => s.weigh.find(w => w.mat === id);
+    line(`${mat(id).name}　狙い wt%`, list.map(s => get(s) ? fmt(get(s).pct,2) : '—'));
+    line(`${mat(id).name}　実秤量 g`, list.map(s => get(s) ? fmt(get(s).actual,1) : '—'));
+    line(`${mat(id).name}　実濃度 wt%`, list.map(s => {
+      const w = get(s); if (!w) return '—';
+      const tot = s.weigh.reduce((t,x)=>t+x.actual,0);
+      return fmt(w.actual * w.active / tot, 3);
+    }));
+  });
+
+  group('造粒条件');
+  for (let i=0;i<ZONES;i++) line(`バレル温度 C${i+1} (℃)`, list.map(s => s.barrel[i]));
+  line('ダイ温度 (℃)',         list.map(s => s.die));
+  line('スクリュー回転数 (rpm)', list.map(s => s.rpm));
+  line('吐出量 (kg/h)',         list.map(s => fmt(s.feed,1)));
+  line('トルク (%)',            list.map(s => s.torque));
+  line('樹脂圧 (MPa)',          list.map(s => fmt(s.press,1)));
+  line('真空度 (kPa)',          list.map(s => s.vac));
+  line('冷却水温 (℃)',          list.map(s => s.bath));
+  line('ペレタイザ (rpm)',       list.map(s => s.pel));
+  line('予備乾燥 (℃ / h)',      list.map(s => `${s.dryT} / ${s.dryH}`));
+
+  group('評価');
+  line('総合判定',   list.map(s => `<span class="tag ${JUDGE[s.judge][1]}">${JUDGE[s.judge][0]}</span>`));
+  line('外観・所見', list.map(s => s.note));
+  const labels = [...new Set(list.flatMap(s => s.extras.map(e => e[0])))];
+  labels.forEach(lb => line(lb, list.map(s => {
+    const e = s.extras.find(x => x[0] === lb);
+    return e ? `${e[1]}${e[2] && e[2] !== '－' ? ' ' + e[2] : ''}` : '—';
+  })));
+
+  $('#cRows').innerHTML = out.join('');
+}
+
+/* 起動 */
+drawRecipeList(); loadRecipe(); drawSampleTab(); drawList(); drawCompare();
+</script>
+</body>
+</html>

@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>マスターバッチ 配合・造粒条件管理</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header>
+  <h1>マスターバッチ 配合・造粒条件管理</h1>
+</header>
+
+<nav>
+  <button data-tab="recipe" class="on">配合</button>
+  <button data-tab="sample" disabled title="Step 2 で実装予定">サンプル記録</button>
+  <button data-tab="list" disabled title="Step 3 で実装予定">サンプル一覧</button>
+  <button data-tab="compare" disabled title="Step 3 で実装予定">比較</button>
+</nav>
+
+<main>
+
+<section id="tab-recipe">
+  <div class="cols">
+    <div class="panel">
+      <h2>配合一覧</h2>
+      <div id="recipeList"></div>
+      <div style="padding:10px 14px"><button class="btn" id="newRecipe" style="width:100%">＋ 新規配合</button></div>
+    </div>
+
+    <div class="panel">
+      <h2>配合の編集<span class="dirty-mark" id="dirtyMark" hidden>未保存の変更あり</span></h2>
+      <div class="body">
+        <div class="row">
+          <div class="field"><label for="rCode">配合コード</label><input class="w-md" id="rCode" placeholder="例: MB-001"></div>
+          <div class="field"><label for="rName">配合名</label><input class="w-xl" id="rName" placeholder="例: PP / 酸化防止剤 2%"></div>
+          <div class="field"><label for="rBase">ベース樹脂</label><select class="w-lg" id="rBase"></select></div>
+        </div>
+
+        <div class="sub-h">添加剤（狙い濃度は「有効成分としての wt%」で入力）</div>
+        <table>
+          <thead><tr>
+            <th>原料</th><th class="num" style="width:110px">有効成分 %</th>
+            <th class="num" style="width:130px">狙い濃度 wt%</th>
+            <th class="num" style="width:130px">仕込み量 g</th><th style="width:50px"></th>
+          </tr></thead>
+          <tbody id="rItems"></tbody>
+        </table>
+        <div style="margin-top:8px">
+          <button class="link" id="addItem">＋ 添加剤を追加</button>
+          <button class="link" id="addMat">＋ 原料マスタに登録</button>
+        </div>
+
+        <div class="row" style="margin-top:16px">
+          <div class="field"><label for="rQty">作成量 (g)</label><input type="number" class="w-md" id="rQty" step="1" min="0"></div>
+        </div>
+
+        <div class="summary" id="rSummary"></div>
+        <div id="rAlert"></div>
+
+        <div class="field" style="margin-top:14px">
+          <label for="rMemo">メモ</label><textarea id="rMemo"></textarea>
+        </div>
+
+        <div class="note">
+          既製マスターバッチを使う場合、そのキャリア樹脂も製品に入るため、ベース樹脂量はその分減ります（上の計算に反映済み）。
+          キャリア樹脂の樹脂種がベース樹脂と異なる場合は、樹脂組成が混ざる点にご注意ください。
+        </div>
+
+        <div class="actions">
+          <button class="btn primary" id="save">保存</button>
+          <button class="btn" id="duplicate" style="margin-left:auto">複製</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+</main>
+
+<dialog id="matDlg">
+  <form method="dialog" id="matForm">
+    <h2>原料マスタに登録</h2>
+    <div class="body">
+      <div class="field"><label for="mName">原料名</label><input id="mName" required placeholder="例: 酸化防止剤MB AO-50MB"></div>
+      <div class="field"><label for="mKind">種別</label>
+        <select id="mKind"><option value="additive">添加剤</option><option value="resin">樹脂（ベース樹脂）</option></select>
+      </div>
+      <div class="field"><label for="mActive">有効成分 %（純品なら 100、50% MB なら 50）</label>
+        <input type="number" id="mActive" value="100" step="any" min="0" max="100" required>
+      </div>
+      <div class="field"><label for="mSupplier">メーカー・購入先</label><input id="mSupplier"></div>
+      <div class="field"><label for="mMemo">メモ</label><input id="mMemo"></div>
+      <div id="mAlert"></div>
+    </div>
+    <div class="actions">
+      <button class="btn" value="cancel" formnovalidate>キャンセル</button>
+      <button class="btn primary" id="mSave" value="save">登録</button>
+    </div>
+  </form>
+</dialog>
+
+<div id="toast" role="status"></div>
+
+<script type="module" src="app.js"></script>
+</body>
+</html>
