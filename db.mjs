@@ -136,15 +136,71 @@ CREATE TABLE sample_history (
 );
 CREATE INDEX idx_history_sample ON sample_history(sample_id);
 `,
+  // 3: サンプルの id を使い回さない（AUTOINCREMENT）。
+  //    使い回すと、削除したサンプルの変更履歴が同じ id の新しいサンプルに付いてしまう。
+  //    SQLite は既存テーブルに AUTOINCREMENT を足せないので作り直す
+  `
+CREATE TABLE samples_new (
+  id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+  recipe_id          INTEGER NOT NULL REFERENCES recipes(id),
+  code               TEXT NOT NULL UNIQUE,
+  made_on            TEXT,
+  total_qty_g        REAL,
+  barrel_temps_json  TEXT,
+  die_temp_c         REAL,
+  screw_rpm          REAL,
+  feed_rate_kg_h     REAL,
+  torque_pct         REAL,
+  resin_pressure_mpa REAL,
+  vacuum_kpa         REAL,
+  strand_bath_temp_c REAL,
+  pelletizer_rpm     REAL,
+  predry_temp_c      REAL,
+  predry_hours       REAL,
+  judgement          TEXT CHECK (judgement IN ('good', 'ok', 'ng')),
+  appearance_note    TEXT,
+  memo               TEXT,
+  created_by         TEXT,
+  version            INTEGER NOT NULL DEFAULT 1,
+  created_at         TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+  updated_at         TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+);
+INSERT INTO samples_new SELECT
+  id, recipe_id, code, made_on, total_qty_g, barrel_temps_json, die_temp_c, screw_rpm, feed_rate_kg_h,
+  torque_pct, resin_pressure_mpa, vacuum_kpa, strand_bath_temp_c, pelletizer_rpm, predry_temp_c, predry_hours,
+  judgement, appearance_note, memo, created_by, version, created_at, updated_at
+FROM samples;
+DROP TABLE samples;
+ALTER TABLE samples_new RENAME TO samples;
+CREATE INDEX idx_samples_recipe ON samples(recipe_id);
+-- 削除済みのサンプルの id（履歴にだけ残っているもの）も含めて、それより後から振る
+DELETE FROM sqlite_sequence WHERE name IN ('samples', 'samples_new');
+INSERT INTO sqlite_sequence (name, seq) VALUES ('samples',
+  MAX((SELECT IFNULL(MAX(id), 0) FROM samples), (SELECT IFNULL(MAX(sample_id), 0) FROM sample_history)));
+`,
 ];
 
 {
-  const { user_version: ver } = db.prepare('PRAGMA user_version').get();
-  for (let v = ver; v < MIGRATIONS.length; v++) {
-    tx(() => {
-      db.exec(MIGRATIONS[v]);
-      db.exec(`PRAGMA user_version = ${v + 1}`);
-    });
+  // テーブルを作り直す版があるので、外部キーの検査は止めて流す
+  // （有効なままだと DROP TABLE samples が子テーブルの行を連鎖削除してしまう）。
+  // この PRAGMA はトランザクションの中では変えられないので外側で切り替える
+  db.exec('PRAGMA foreign_keys = OFF');
+  try {
+    for (let v = 0; v < MIGRATIONS.length; v++) {
+      tx(() => {
+        // 版はロックを取ってから読む（同時に2つ起動しても同じ版を二重に流さない）
+        if (db.prepare('PRAGMA user_version').get().user_version !== v) return;
+        db.exec(MIGRATIONS[v]);
+        if (db.prepare('PRAGMA foreign_key_check').all().length) throw new Error(`マイグレーション ${v + 1} で外部キーの不整合`);
+        db.exec(`PRAGMA user_version = ${v + 1}`);
+      });
+    }
+  } finally {
+    db.exec('PRAGMA foreign_keys = ON');
+  }
+  const { user_version } = db.prepare('PRAGMA user_version').get();
+  if (user_version > MIGRATIONS.length) {
+    throw new Error(`データベースの版（${user_version}）がこのアプリより新しいです。新しい版のアプリで開いてください`);
   }
 }
 
@@ -254,7 +310,7 @@ export function saveRecipe(input, id = null) {
       const sig = (base, items) => JSON.stringify([base, items.map(i => [i.material_id, i.target_active_pct])
         .sort((a, b) => a[0] - b[0])]);
       if (cur.sample_count > 0 && sig(cur.base_material_id, cur.items) !== sig(v.base_material_id, v.items)) {
-        throw new HttpError(409, `この配合にはサンプルが ${cur.sample_count} 件あるため、組成は変更できません。「複製」で新しい配合を作ってください`);
+        throw new HttpError(409, `この配合にはサンプルが ${cur.sample_count} 件あるため、組成は変更できません。「複製」で新しい配合を作ってください`, 'locked');
       }
       db.prepare(`
         UPDATE recipes SET code = ?, name = ?, base_material_id = ?, default_qty_g = ?, memo = ?,

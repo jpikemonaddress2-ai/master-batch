@@ -158,3 +158,6 @@ button.list-item:focus-visible,button.link:focus-visible{outline:2px solid var(-
 dialog.wide{width:min(900px, calc(100vw - 32px))}
 .history{margin-top:16px}
 .history li{margin:3px 0}
+button.link:disabled,button.del:disabled{color:var(--sub); border-color:var(--line); background:none; cursor:default; opacity:.6}
+dialog.wide .body{max-height:70vh; overflow:auto}
+[hidden]{display:none !important}

@@ -72,15 +72,4 @@ export function rememberedAuthor() {
 export function rememberAuthor(name) {
   try { localStorage.setItem('mb.author', name); } catch { /* 保存できなくても動作に支障なし */ }
 }
-
-/** 変更履歴に残す名前。覚えていなければ尋ねる。断られたら null */
-export function askEditor() {
-  let name = rememberedAuthor();
-  if (!name) {
-    name = (prompt('あなたの名前を入力してください（変更履歴に残します）') ?? '').trim();
-    if (name) rememberAuthor(name);
-  }
-  return name || null;
-}
-
 export const today = () => new Date().toLocaleDateString('sv-SE');

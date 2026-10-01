@@ -84,10 +84,11 @@ export function sampleEntries(s, zones) {
  * 複数サンプルを転置表にする。項目はグループ順、グループ内は最初に現れた順。
  * 単位が全サンプルで揃っていれば見出しに付け、揃っていなければ各セルの値に付ける。
  *
+ * @param {{allDiff?:boolean}} [opts] allDiff: サンプル番号・作成日・記入者も差分として扱う（変更履歴の差分用）
  * @returns {{group:string, key:string, label:string, unit:string, cells:string[], diff:boolean}[]}
  *   diff: セルの値が揃っていない（＝振った条件・出た差）。片方だけ空の場合も差とみなす
  */
-export function buildMatrix(samples, zones) {
+export function buildMatrix(samples, zones, { allDiff = false } = {}) {
   const per = samples.map(s => new Map(sampleEntries(s, zones).map(e => [e.key, e])));
   const rows = [];
   for (const g of GROUPS) {
@@ -104,7 +105,7 @@ export function buildMatrix(samples, zones) {
       const shared = units.size <= 1;
       const unit = shared ? ([...units][0] ?? meta.get(key).unit) : '';
       const cells = es.map(e => (!e || e.value === '') ? '' : (shared || !e.unit ? e.value : `${e.value} ${e.unit}`));
-      const diff = !meta.get(key).noDiff && new Set(cells).size > 1;
+      const diff = (allDiff || !meta.get(key).noDiff) && new Set(cells).size > 1;
       rows.push({ group: g.id, key, label: meta.get(key).label, unit, cells, diff });
     }
   }

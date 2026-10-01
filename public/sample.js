@@ -4,7 +4,7 @@ import { COND_FIELDS, JUDGEMENTS } from './fields.mjs';
 import { buildMatrix } from './matrix.mjs';
 import {
   $, esc, fmt, toNum, alertBox, api, toast, state, matById, recipeById, reloadMasters,
-  registerDirty, rememberedAuthor, rememberAuthor, today, askEditor, showAlertWithAction,
+  registerDirty, rememberedAuthor, rememberAuthor, today, showAlertWithAction,
 } from './common.js';
 
 let samples = [];      // 左の一覧
@@ -61,6 +61,7 @@ function blankDraft(recipe) {
     ...Object.fromEntries(COND_FIELDS.map(f => [f.key, null])),
     judgement: null, appearance_note: '', memo: '',
     extras: [], actuals: {}, lots: {}, basis: basisFromRecipe(recipe),
+    source_id: null, source_code: null,   // 引用元のサンプル（画面表示用）
   };
 }
 
@@ -165,11 +166,18 @@ function drawForm() {
   document.querySelectorAll('input[name="sJudge"]').forEach(el => { el.checked = el.value === (draft.judgement ?? ''); });
   $('#sNote').value = draft.appearance_note;
   $('#sMemo').value = draft.memo;
-  $('#sDelete').hidden = draft.id === null;
-  // 記入者は作成時に確定する。後から直した人は変更履歴に残る
-  $('#sBy').disabled = draft.id !== null;
-  $('#sMeta').textContent = draft.id === null ? '新規サンプル'
-    : `作成 ${draft.created_at}（${draft.created_by}）／ 最終更新 ${draft.updated_at}`;
+  const isNew = draft.id === null;
+  $('#sDelete').hidden = isNew;
+  $('#sCopy').hidden = isNew;
+  // 記入者は作成時に確定する。既存サンプルを直す人は「変更者」として毎回名前を残す
+  $('#sBy').disabled = !isNew;
+  $('#sEditorField').hidden = isNew;
+  if (!isNew) $('#sEditor').value = rememberedAuthor();
+  $('#sSourceField').hidden = !isNew;
+  drawSourceSelect();
+  $('#sMeta').textContent = isNew
+    ? (draft.source_code ? `新規サンプル（${draft.source_code} から引用。実秤量・ロット・評価・測定値の値は空です）` : '新規サンプル')
+    : `作成 ${draft.created_at}（${draft.created_by || '記入者なし'}）／ 最終更新 ${draft.updated_at}`;
   drawWeigh();
   drawExtras('condition');
   drawExtras('measurement');
@@ -189,23 +197,30 @@ async function drawHistory() {
     return;
   }
   if (draft.id !== id || !hist.length) return;
+  // hist は新しい順。i 番目の変更は「hist[i].snapshot（変更前）→ 一つ新しい版（変更後）」で、
+  // 一つ新しい版は hist[i-1].snapshot、最新の変更だけは現在の内容になる
   box.innerHTML = `<div class="sub-h history">変更履歴（${hist.length} 件）</div><ul class="history" style="margin:0; padding-left:18px">${
-    hist.map((h, i) => `<li>${esc(h.changed_at)} ${esc(h.changed_by)} が変更
-      <button type="button" class="link" data-h="${i}">変更前との差分</button></li>`).join('')}</ul>`;
+    hist.map((h, i) => `<li>${esc(h.changed_at)} ${esc(h.changed_by)} が${h.op === 'delete' ? '削除' : '変更'}
+      <button type="button" class="link" data-h="${i}">この変更の内容</button></li>`).join('')}</ul>`;
   box.querySelectorAll('button[data-h]').forEach(b => b.onclick = async () => {
-    const h = hist[Number(b.dataset.h)];
-    const cur = await api('GET', `/api/samples/${id}`);
-    showHistoryDiff(h, cur);
+    const i = Number(b.dataset.h);
+    try {
+      const after = i === 0 ? await api('GET', `/api/samples/${id}`) : hist[i - 1].snapshot;
+      showHistoryDiff(hist[i], after);
+    } catch (e) {
+      toast(e.message);
+    }
   });
 }
 
-function showHistoryDiff(h, cur) {
-  const rows = buildMatrix([h.snapshot, cur], zones()).filter(r => r.diff);
-  $('#histTitle').textContent = `${h.changed_at} ${h.changed_by} による変更（変更前 → 現在）`;
+function showHistoryDiff(h, after) {
+  // 監査用なので、比較表では差分にしないサンプル番号・作成日・記入者の書き換えも出す
+  const rows = buildMatrix([h.snapshot, after], zones(), { allDiff: true }).filter(r => r.diff);
+  $('#histTitle').textContent = `${h.changed_at} ${h.changed_by} による変更`;
   $('#histRows').innerHTML = rows.length
-    ? '<tr class="grp"><td>項目</td><td>変更前</td><td>現在</td></tr>' + rows.map(r => `<tr class="diff">
+    ? '<tr><th scope="col">項目</th><th scope="col">変更前</th><th scope="col">変更後</th></tr>' + rows.map(r => `<tr class="diff">
         <td>${esc(r.label)}${r.unit ? ` (${esc(r.unit)})` : ''}</td>${r.cells.map(v => `<td>${v === '' ? '—' : esc(v)}</td>`).join('')}</tr>`).join('')
-    : '<tr><td class="empty">表示できる差分はありません（更新日時などのみ）。</td></tr>';
+    : '<tr><td class="empty">内容の変更はありません（保存のみ）。</td></tr>';
   $('#histDlg').showModal();
 }
 $('#histClose').onclick = () => $('#histDlg').close();
@@ -327,7 +342,8 @@ async function save(changedBy) {
     ...draft,
     basis: undefined, lots: undefined,
     changed_by: changedBy,
-    extras: draft.extras.filter(e => e.label.trim() || e.value.trim() || e.unit.trim()),
+    // 値の無い行は保存しない（引用で項目名だけ並べた測定値を、測らなかった場合など）
+    extras: draft.extras.filter(e => e.value.trim()),
     actuals: rows.map(r => ({
       material_id: r.material_id, row_type: r.row_type, actual_g: r.actual_g, lot: draft.lots[rowKey(r)] ?? '',
     })),
@@ -336,19 +352,26 @@ async function save(changedBy) {
     ? await api('POST', '/api/samples', body)
     : await api('PUT', `/api/samples/${draft.id}`, body);
   if (draft.id === null) rememberAuthor(saved.created_by ?? '');
-  await reloadSamples();
+  await reloadAfterChange();
   return saved;
+}
+
+// サンプルの件数が変わると配合タブの組成ロックも変わるので、配合も取り直す
+async function reloadAfterChange() {
+  await Promise.all([reloadSamples(), reloadMasters()]);
 }
 
 // 保存が競合したときの回復。入力中の内容をできるだけ残す
 async function recoverFromConflict(e) {
   if (e.code === 'recipe_changed') {
-    // 他の人が配合を変えた: 最新の配合で狙い量を取り直す（実秤量・ロットは残す）
-    await reloadMasters();
-    const r = recipeById(draft.recipe_id);
-    if (r) Object.assign(draft, { recipe_version: r.version, basis: basisFromRecipe(r) });
-    drawWeigh();
-    $('#sAlert').innerHTML = alertBox(e.message);
+    // 他の人が配合を変えた: 最新の配合で狙い量を取り直す（実秤量・ロットは残す）。
+    // reloadMasters が masters-changed を発火し、新規の下書きの狙い量を作り直す
+    try {
+      await reloadMasters();
+      $('#sAlert').innerHTML = alertBox(e.message);
+    } catch (err) {
+      $('#sAlert').innerHTML = alertBox(`${e.message}（配合の読み直しに失敗しました: ${err.message}）`);
+    }
   } else if (e.code === 'stale') {
     showAlertWithAction($('#sAlert'), e.message, '最新を読み直す（自分の変更は破棄）',
       () => openSample(draft.id, { force: true }));
@@ -357,27 +380,31 @@ async function recoverFromConflict(e) {
   }
 }
 
+// 既存サンプルを直す・消す人の名前。画面の「変更者」欄から取り、空なら止める
+function editorName() {
+  const name = $('#sEditor').value.trim();
+  if (!name) {
+    $('#sAlert').innerHTML = alertBox('既存のサンプルを変更・削除するときは「変更者」に名前を入力してください（変更履歴に残ります）');
+    $('#sEditor').focus();
+    return null;
+  }
+  rememberAuthor(name);
+  return name;
+}
+
 async function runSave(next) {
+  $('#sAlert').innerHTML = '';
   let changedBy = null;
   if (draft.id !== null) {
-    changedBy = askEditor();
+    changedBy = editorName();
     if (!changedBy) return;
   }
   $('#sSave').disabled = $('#sSaveNext').disabled = true;
-  $('#sAlert').innerHTML = '';
   try {
     const saved = await save(changedBy);
     if (next) {
-      // 同じ配合で条件を振る実験が多いので、配合・日付・量・記入者・造粒条件を引き継ぐ
-      const d = blankDraft(recipeById(saved.recipe_id));
-      const s = fromSample(saved);
-      Object.assign(d, {
-        made_on: s.made_on, total_qty_g: s.total_qty_g, created_by: s.created_by,
-        barrel_temps: s.barrel_temps, die_temp_c: s.die_temp_c,
-        ...Object.fromEntries(COND_FIELDS.map(f => [f.key, s[f.key]])),
-        extras: s.extras.filter(e => e.category === 'condition'),
-      });
-      openDraft(d);
+      // 同じ配合で条件を振る実験が多いので、今保存したサンプルを引用して次を作る
+      openDraft(draftFromSource(saved, { continued: true }));
       toast(`「${saved.code}」を保存しました。続けて次のサンプルを入力できます`);
       $('#sCode').focus();
     } else {
@@ -386,6 +413,7 @@ async function runSave(next) {
     }
   } catch (e) {
     await recoverFromConflict(e);
+  } finally {
     calcSample();
   }
 }
@@ -394,18 +422,78 @@ $('#sSave').onclick = () => runSave(false);
 $('#sSaveNext').onclick = () => runSave(true);
 
 $('#sDelete').onclick = async () => {
-  if (!confirm(`サンプル「${draft.code}」を削除します。一覧からは消えます（削除前の内容は変更履歴に残ります）。よろしいですか？`)) return;
-  const changedBy = askEditor();
+  $('#sAlert').innerHTML = '';
+  const changedBy = editorName();
   if (!changedBy) return;
+  if (!confirm(`サンプル「${draft.code}」を削除します（変更者: ${changedBy}）。\n一覧からは消えます。削除前の内容はサーバーの変更履歴に残ります。よろしいですか？`)) return;
   try {
     const recipe = recipeById(draft.recipe_id);
     await api('DELETE', `/api/samples/${draft.id}`, { changed_by: changedBy });
-    await reloadSamples();
+    await reloadAfterChange();
     openDraft(blankDraft(recipe ?? state.recipes[0]));
     toast('削除しました');
   } catch (e) {
     $('#sAlert').innerHTML = alertBox(e.message);
   }
+};
+
+/* ---------- 前のサンプルを引用して新規作成 ---------- */
+
+/**
+ * 保存済みサンプルを元に新規の下書きを作る。
+ * 引き継ぐ: 配合・作成量・造粒条件（バレル・ダイ・運転・自由項目）・測定値の項目名と単位
+ * 引き継がない: サンプル番号（次の番号を提案）・作成日（今日）・実秤量・ロット・評価・所見・メモ・測定値の値
+ * continued: 「保存して続けて新規」のとき。作成日と記入者も引き継ぐ
+ */
+function draftFromSource(s, { continued = false } = {}) {
+  const src = fromSample(s);
+  const d = blankDraft(recipeById(s.recipe_id));
+  Object.assign(d, {
+    total_qty_g: src.total_qty_g,
+    barrel_temps: src.barrel_temps, die_temp_c: src.die_temp_c,
+    ...Object.fromEntries(COND_FIELDS.map(f => [f.key, src[f.key]])),
+    extras: [
+      ...src.extras.filter(e => e.category === 'condition'),
+      ...src.extras.filter(e => e.category === 'measurement').map(e => ({ ...e, value: '' })),
+    ],
+    source_id: s.id, source_code: s.code,
+  });
+  if (continued) Object.assign(d, { made_on: src.made_on || today(), created_by: src.created_by });
+  return d;
+}
+
+async function copyFrom(id) {
+  try {
+    const s = await api('GET', `/api/samples/${id}`);
+    openDraft(draftFromSource(s));
+    toast(`「${s.code}」を引用しました。サンプル番号・実秤量・評価を入力してください`);
+    $('#sCode').focus();
+  } catch (e) {
+    toast(e.message);
+    drawSourceSelect();
+  }
+}
+
+function drawSourceSelect() {
+  $('#sSource').innerHTML = '<option value="">（引用しない）</option>' + samples.map(s =>
+    `<option value="${s.id}" ${s.id === draft.source_id ? 'selected' : ''}>${esc(s.code)} — ${esc(s.recipe_code)}（${esc(s.made_on ?? '')}）</option>`
+  ).join('');
+}
+
+$('#sSource').onchange = e => {
+  if (!confirmDiscard()) {
+    drawSourceSelect();
+    return;
+  }
+  const id = Number(e.target.value);
+  if (id) copyFrom(id);
+  else openDraft(blankDraft(recipeById(draft.recipe_id) ?? state.recipes[0]));
+};
+
+// 開いている既存サンプルを元に新規作成
+$('#sCopy').onclick = () => {
+  if (!confirmDiscard()) return;
+  copyFrom(draft.id);
 };
 
 $('#newSample').onclick = () => {
@@ -428,7 +516,7 @@ function bind(sel, key, conv = v => v, after) {
 $('#sRecipe').onchange = e => {
   const entered = Object.values(draft.actuals).some(v => Number.isFinite(v)) ||
     Object.values(draft.lots).some(v => v);
-  if (entered && !confirm('配合を変えると、入力済みの実秤量とロットがクリアされます。よろしいですか？')) {
+  if (entered && !confirm('配合を変えると、入力済みの実秤量とロットがクリアされ、作成量は配合の基準量に戻ります。よろしいですか？')) {
     e.target.value = draft.recipe_id;
     return;
   }

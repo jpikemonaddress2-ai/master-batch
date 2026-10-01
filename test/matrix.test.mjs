@@ -26,6 +26,11 @@ test('サンプル番号・作成日・記入者は値が違っても差分に�
   assert.deepEqual(rows.filter(r => r.diff), []);
 });
 
+test('allDiff: 変更履歴の差分ではサンプル番号・作成日の書き換えも差分にする', () => {
+  const rows = buildMatrix([sample(), sample({ code: 'S-009', made_on: '2026-01-01' })], 2, { allDiff: true });
+  assert.deepEqual(rows.filter(r => r.diff).map(r => r.key), ['code', 'made_on']);
+});
+
 test('同じ項目名の自由項目（n=2）は別の行として残す', () => {
   const s = sample({ extras: [
     { category: 'measurement', label: 'MFR', value: '1', unit: 'g/10min' },

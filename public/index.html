@@ -92,6 +92,10 @@
       <h2>サンプル記録<span class="dirty-mark" id="sDirtyMark" hidden>未保存の変更あり</span></h2>
       <div class="body">
         <div class="hint" id="sMeta" style="padding:0 0 10px"></div>
+        <div class="row" id="sSourceField" style="margin-bottom:12px">
+          <div class="field"><label for="sSource">前のサンプルから引用</label><select class="w-xl" id="sSource"></select></div>
+          <span class="hint" style="padding:0 0 6px">配合・作成量・造粒条件・測定項目名を引き継ぎます</span>
+        </div>
         <div class="row">
           <div class="field"><label for="sRecipe">配合</label><select class="w-xl" id="sRecipe"></select></div>
           <div class="field"><label for="sCode">サンプル番号</label><input class="w-md" id="sCode" placeholder="例: S-2026-001"></div>
@@ -151,9 +155,11 @@
         </div>
 
         <div id="sAlert"></div>
-        <div class="actions">
+        <div class="actions" style="align-items:flex-end">
+          <div class="field" id="sEditorField"><label for="sEditor">変更者（履歴に残ります）</label><input class="w-md" id="sEditor"></div>
           <button class="btn primary" id="sSave">保存</button>
           <button class="btn" id="sSaveNext">保存して続けて新規</button>
+          <button class="btn" id="sCopy">このサンプルを元に新規作成</button>
           <button class="btn" id="sDelete" style="margin-left:auto">削除</button>
         </div>
         <div id="sHistory"></div>
@@ -233,7 +239,7 @@
   </form>
 </dialog>
 
-<dialog id="histDlg" class="wide">
+<dialog id="histDlg" class="wide" aria-labelledby="histTitle">
   <h2 id="histTitle">変更前との差分</h2>
   <div class="body">
     <div class="wrapper"><table class="cmp"><tbody id="histRows"></tbody></table></div>

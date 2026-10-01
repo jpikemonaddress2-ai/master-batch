@@ -51,6 +51,19 @@ test('同時編集: 古い version での保存は stale', () => {
   assert.throws(() => store.saveSample({ ...s, memo: 'B', changed_by: 'B' }, s.id), e => e.code === 'stale');
 });
 
+test('削除したサンプルの id は再利用しない（履歴が別のサンプルに付かない）', () => {
+  const a = newSample('S-ID-1');
+  store.deleteSample(a.id, { changed_by: '佐藤' });
+  const b = newSample('S-ID-2');
+  assert.notEqual(b.id, a.id);
+  assert.deepEqual(store.listHistory(b.id), []);
+});
+
+test('組成ロックは code: locked を返す', () => {
+  const r = store.getRecipe(recipe.id);
+  assert.throws(() => store.saveRecipe({ ...r, base_material_id: resin.id, items: [] }, r.id), e => e.code === 'locked');
+});
+
 test('記入者は更新で変わらず、更新・削除の前の内容が履歴に残る', () => {
   const s = newSample('S-002');
   const upd = store.saveSample({ ...s, created_by: '別人', judgement: 'ng', changed_by: '佐藤' }, s.id);

@@ -167,22 +167,52 @@ $('#newRecipe').onclick = () => {
   $('#rCode').focus();
 };
 
-$('#duplicate').onclick = () => {
-  if (!confirmDiscard()) return;
+// 編集中の内容のまま、新しい配合として開き直す（コードは空にする）
+function duplicateDraft() {
   const copy = { ...structuredClone(draft), id: null, version: null, sample_count: 0, code: '', name: `${draft.name}（複製）` };
   openDraft(copy);
   setDirty(true);
   $('#rCode').focus();
+}
+
+$('#duplicate').onclick = () => {
+  if (!confirmDiscard()) return;
+  duplicateDraft();
 };
 
 // 他の人が先に保存したとき: 自分の変更を捨てて最新を読み直す
 async function reloadCurrent() {
   const id = draft.id;
-  await reloadMasters();
+  try {
+    await reloadMasters();
+  } catch (e) {
+    toast(`読み直せませんでした: ${e.message}`);
+    return;
+  }
   const r = recipeById(id);
-  if (r) openDraft(toDraft(r));
+  if (!r) {
+    toast('この配合は見つかりませんでした');
+    return;
+  }
+  openDraft(toDraft(r));
   toast('最新の内容を読み直しました');
 }
+
+// サンプルの保存・削除などで配合（サンプル件数）が変わったら、一覧とロック表示を取り直す。
+// 編集中の入力は残し、サンプル件数（＝ロックの有無）だけを反映する
+document.addEventListener('masters-changed', () => {
+  if (!draft) return;
+  drawRecipeList();
+  const r = draft.id !== null ? recipeById(draft.id) : null;
+  if (!r || r.sample_count === draft.sample_count) return;
+  if (dirty) {
+    draft.sample_count = r.sample_count;
+    drawForm();
+    setDirty(true);
+  } else {
+    openDraft(toDraft(r));
+  }
+});
 
 $('#save').onclick = async () => {
   const btn = $('#save');
@@ -198,6 +228,10 @@ $('#save').onclick = async () => {
   } catch (e) {
     if (e.code === 'stale') {
       showAlertWithAction($('#rSaveAlert'), e.message, '最新を読み直す（自分の変更は破棄）', reloadCurrent);
+    } else if (e.code === 'locked') {
+      // 開いている間に他の人がこの配合でサンプルを作った: 件数を取り直してロック表示にし、複製へ誘導する
+      await reloadMasters().catch(() => {});
+      showAlertWithAction($('#rSaveAlert'), e.message, 'この内容で複製する', duplicateDraft);
     } else {
       $('#rSaveAlert').innerHTML = alertBox(e.message);
     }
@@ -225,11 +259,18 @@ $('#addMat').onclick = () => {
 
 $('#mCancel').onclick = () => $('#matDlg').close();
 
+// 樹脂はほぼ常に 100%。添加剤は既製MBの取り違えを防ぐため空欄から入力してもらう
+$('#mKind').onchange = () => {
+  const el = $('#mActive');
+  if ($('#mKind').value === 'resin' && el.value === '') el.value = '100';
+  else if ($('#mKind').value === 'additive' && el.value === '100') el.value = '';
+};
+
 $('#matForm').onsubmit = async e => {
   e.preventDefault();
   // 既製MBを純品のまま登録すると仕込み量が狂う（このアプリが防ぎたい事故）ので、添加剤の 100% は確かめる
   if ($('#mKind').value === 'additive' && Number($('#mActive').value) === 100 &&
-      !confirm('有効成分 100%（純品）として登録します。\n既製マスターバッチ（例: 有効成分 50%）ではありませんか？')) {
+      !confirm('有効成分 100%（純品）で登録してよろしいですか？\n\n既製マスターバッチ（例: 有効成分 50%）の場合は［キャンセル］を押して、有効成分 % を直してください。')) {
     $('#mActive').focus();
     return;
   }
