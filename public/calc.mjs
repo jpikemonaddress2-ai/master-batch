@@ -1,4 +1,4 @@
-// 配合計算ロジック。画面（app.js）とサーバー（db.mjs）の両方から import する。
+// 配合計算ロジック。画面（recipe.js / sample.js）とサーバー（db.mjs）の両方から import する。
 // 計算はここ一箇所だけに置き、二重実装による食い違いを防ぐ。
 
 // 浮動小数の誤差で「ちょうど総量」が配合過剰扱いにならないための許容幅 (g)
@@ -90,6 +90,25 @@ export function compositionSig(baseMaterialId, items) {
   return JSON.stringify([Number(baseMaterialId), items
     .map(i => [Number(i.material_id), Number(i.target_active_pct)])
     .sort((a, b) => a[0] - b[0])]);
+}
+
+/**
+ * 配合に含まれる使用停止の原料の名前（ベース樹脂を含む）。
+ * 使用停止の原料は有効成分%などの誤登録で止められていることがあり、そのまま秤量すると換算ミスになるので、
+ * 新しいサンプルを作らせない（画面とサーバーで同じ判定にするため、ここに置く）
+ * @param {{items:{archived:number, material_name:string}[]}} recipe GET /api/recipes の形
+ * @param {{name:string, archived:number}|undefined} base ベース樹脂の原料
+ */
+export function archivedNames(recipe, base) {
+  return [...(base?.archived ? [base.name] : []), ...recipe.items.filter(i => i.archived).map(i => i.material_name)];
+}
+
+/** 使用停止の原料を含む配合から新しいサンプルを作ろうとしたときの案内 */
+export function archivedMessage(names, sampleCount) {
+  return `この配合には使用停止の原料（${names.join('、')}）が含まれているため、新しいサンプルを作れません。` +
+    (sampleCount > 0
+      ? '配合タブで「複製」し、原料を置き換えた配合を使ってください'
+      : '配合タブでこの配合の原料を置き換えてから作ってください');
 }
 
 /** 保存済みサンプルの秤量明細（スナップショット）から、狙い量の計算元を作る */

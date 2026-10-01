@@ -1,39 +1,49 @@
 // 画面4: 比較（選んだサンプルを列に並べた転置表）
-import { buildMatrix, GROUPS } from './matrix.mjs';
+import { buildMatrix, GROUPS, sortForCompare, visibleRows } from './matrix.mjs';
 import { JUDGEMENTS } from './fields.mjs';
 import { $, esc, api, state } from './common.js';
+
+const MAX_CSV = 200;   // CSV に出せる件数（server.mjs の MAX_COMPARE と同じ）
 
 const JUDGE_CLASS = Object.fromEntries(Object.entries(JUDGEMENTS).map(([k, v]) => [v, k]));
 
 let matrix = [];
+let ids = [];    // 表に出しているサンプル（左からの順）。CSV に使う
 let count = 0;
 let seq = 0;   // 遅れて返ってきた古い要求の結果で上書きしないため
 
-export async function drawCompare(ids) {
+export async function drawCompare(selectedIds) {
   const my = ++seq;
-  if (ids.length < 2) {
-    matrix = [];
+  if (selectedIds.length < 2) {
+    clear();
     $('#cNote').textContent = '';
     $('#cRows').innerHTML = '<tr><td class="empty">サンプル一覧で 2 件以上を選択してください。</td></tr>';
     return;
   }
+  clear();
   $('#cRows').innerHTML = '<tr><td class="empty">読み込み中…</td></tr>';
   // 他の人が削除したサンプルは飛ばして、残りで比べる
-  const results = await Promise.allSettled(ids.map(id => api('GET', `/api/samples/${id}`)));
+  const results = await Promise.allSettled(selectedIds.map(id => api('GET', `/api/samples/${id}`)));
   if (my !== seq) return;
   const samples = results.filter(r => r.status === 'fulfilled').map(r => r.value);
   const missing = results.length - samples.length;
   $('#cNote').textContent = missing ? `${missing} 件のサンプルは読めませんでした（削除された可能性があります）。` : '';
   if (samples.length < 2) {
-    matrix = [];
+    clear();
     $('#cRows').innerHTML = '<tr><td class="empty">比べられるサンプルが 2 件未満です。サンプル一覧で選び直してください。</td></tr>';
     return;
   }
-  // 作成日の古い順に左から並べる
-  samples.sort((a, b) => (a.made_on ?? '').localeCompare(b.made_on ?? '') || a.id - b.id);
-  matrix = buildMatrix(samples, state.config.barrelZones);
-  count = samples.length;
+  const sorted = sortForCompare(samples);
+  matrix = buildMatrix(sorted, state.config.barrelZones);
+  ids = sorted.map(s => s.id);
+  count = sorted.length;
   render();
+}
+
+function clear() {
+  matrix = [];
+  ids = [];
+  $('#cCsv').hidden = true;
 }
 
 function cell(row, v) {
@@ -45,17 +55,22 @@ function cell(row, v) {
 function render() {
   if (!matrix.length) return;
   const onlyDiff = $('#cOnlyDiff').checked;
+  const shown = visibleRows(matrix, onlyDiff);
   const out = [];
   for (const g of GROUPS) {
-    const rows = matrix.filter(r => r.group === g.id && (!onlyDiff || r.diff || r.key === 'code'));
+    const rows = shown.filter(r => r.group === g.id);
     if (!rows.length) continue;
     out.push(`<tr class="grp"><th colspan="${count + 1}" scope="colgroup">${esc(g.label)}</th></tr>`);
     for (const r of rows) {
       out.push(`<tr class="${r.diff ? 'diff' : ''}">
-        <th scope="row">${esc(r.label)}${r.unit ? ` (${esc(r.unit)})` : ''}${r.diff ? '<span class="sr-only">（差あり）</span>' : ''}</th>${r.cells.map(v => cell(r, v)).join('')}</tr>`);
+        <th scope="row">${r.diff ? '<span class="diff-sign" aria-hidden="true">≠</span>' : ''}${esc(r.label)}${r.unit ? ` (${esc(r.unit)})` : ''}${r.diff ? '<span class="sr-only">（差あり）</span>' : ''}</th>${r.cells.map(v => cell(r, v)).join('')}</tr>`);
     }
   }
   $('#cRows').innerHTML = out.join('');
+  // 画面に出している行・列のまま CSV にする（他の人がその後で直した場合は、ダウンロード時点の内容になる）
+  $('#cCsv').href = `/api/samples/compare.csv?ids=${ids.join(',')}${onlyDiff ? '&onlyDiff=1' : ''}`;
+  $('#cCsv').hidden = ids.length > MAX_CSV;
+  if (ids.length > MAX_CSV) $('#cNote').textContent = `CSV に出せるのは ${MAX_CSV} 件までです。サンプル一覧で選び直してください。`;
 }
 
 $('#cOnlyDiff').onchange = render;

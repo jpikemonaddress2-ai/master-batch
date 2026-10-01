@@ -20,9 +20,11 @@ const s2 = v => (v === null || v === undefined) ? '' : String(v);
  * 1サンプルを項目の並びにする。
  * @param {object} s GET /api/samples/:id の形（recipe_code, weighings, extras, barrel_temps を含む）
  * @param {number} zones バレル温度のゾーン数
- * @returns {{group:string, key:string, label:string, unit:string, value:string, noDiff?:boolean, stamp?:boolean}[]}
+ * @returns {{group:string, key:string, label:string, unit:string, value:string, noDiff?:boolean, stamp?:boolean, live?:boolean}[]}
  *   noDiff: 値が違って当然の項目（サンプル番号など）。比較表では差分扱いしない（変更履歴の差分では扱う）
  *   stamp: 記録日時。保存のたびに変わるので、変更履歴の差分でも扱わない
+ *   live: サンプルの記録ではなく、表示のたびに配合から引く値（配合名）。
+ *         配合の名前を変えるとサンプルの履歴の差分に紛れ込むので、変更履歴の差分では扱わない
  */
 export function sampleEntries(s, zones) {
   const out = [];
@@ -32,7 +34,7 @@ export function sampleEntries(s, zones) {
   add('basic', 'code', 'サンプル番号', '', s.code, { noDiff: true });
   add('basic', 'made_on', '作成日', '', s.made_on, { noDiff: true });
   add('basic', 'recipe', '配合', '', s.recipe_code);
-  add('basic', 'recipe_name', '配合名', '', s.recipe_name);
+  add('basic', 'recipe_name', '配合名', '', s.recipe_name, { live: true });
   add('basic', 'total_qty_g', '作成量', 'g', fmtRaw(s.total_qty_g));
   add('basic', 'created_by', '記入者', '', s.created_by, { noDiff: true });
 
@@ -114,11 +116,24 @@ export function buildMatrix(samples, zones, { allDiff = false } = {}) {
       const unit = shared ? ([...units][0] ?? meta.get(key).unit) : '';
       const cells = es.map(e => (!e || e.value === '') ? '' : (shared || !e.unit ? e.value : `${e.value} ${e.unit}`));
       const m = meta.get(key);
-      const counts = allDiff ? !m.stamp : !m.noDiff;
+      const counts = allDiff ? !(m.stamp || m.live) : !m.noDiff;
       rows.push({ group: g.id, key, label: m.label, unit, cells, diff: counts && new Set(cells).size > 1 });
     }
   }
   return rows;
+}
+
+/** 比較表の並び順（作成日の古い順に左から。同じ日は登録順） */
+export function sortForCompare(samples) {
+  return [...samples].sort((a, b) => (a.made_on ?? '').localeCompare(b.made_on ?? '') || a.id - b.id);
+}
+
+// 差のある行だけにしても残す行。どの列がどのサンプルの、どの配合の、いつの内容かが分かるように
+const CONTEXT_KEYS = new Set(['code', 'made_on', 'recipe', 'updated_at']);
+
+/** 比較表に出す行。onlyDiff なら差のある行だけ（CONTEXT_KEYS の行は残す） */
+export function visibleRows(rows, onlyDiff) {
+  return rows.filter(r => !onlyDiff || r.diff || CONTEXT_KEYS.has(r.key));
 }
 
 const csvCell = v => {
@@ -128,11 +143,27 @@ const csvCell = v => {
   return `"${s.replace(/"/g, '""')}"`;
 };
 
-/** 1行1サンプルの CSV（Excel で文字化けしないよう BOM 付き、改行 CRLF） */
+// Excel で文字化けしないよう BOM 付き、改行 CRLF
+const csvText = lines => '\ufeff' + lines.map(l => l.map(csvCell).join(',')).join('\r\n') + '\r\n';
+
+/**
+ * 比較表の形（1行1項目、1列1サンプル）の CSV。画面の比較表・サンプル記録をそのまま表計算に持っていく用。
+ * 2件以上なら「差」の列に、値が揃っていない行の印を付ける
+ */
+export function toMatrixCsv(samples, zones, { onlyDiff = false } = {}) {
+  const many = samples.length > 1;
+  const label = Object.fromEntries(GROUPS.map(g => [g.id, g.label]));
+  const rows = visibleRows(buildMatrix(samples, zones), onlyDiff && many);
+  const header = ['区分', '項目', '単位', ...(many ? ['差'] : []), ...samples.map(s => s.code)];
+  return csvText([header, ...rows.map(r =>
+    [label[r.group], r.label, r.unit, ...(many ? [r.diff ? '有' : ''] : []), ...r.cells])]);
+}
+
+/** 1行1サンプルの CSV */
 export function toCsv(samples, zones) {
   const rows = buildMatrix(samples, zones);
   const prefix = Object.fromEntries(GROUPS.map(g => [g.id, g.csv ?? '']));
   const header = rows.map(r => `${prefix[r.group]}${r.label}${r.unit ? ` (${r.unit})` : ''}`);
   const lines = [header, ...samples.map((_, i) => rows.map(r => r.cells[i]))];
-  return '﻿' + lines.map(l => l.map(csvCell).join(',')).join('\r\n') + '\r\n';
+  return csvText(lines);
 }

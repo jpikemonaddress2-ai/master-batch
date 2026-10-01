@@ -2,9 +2,9 @@ import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { DB_PATH, BARREL_ZONES } from './config.mjs';
-import { calcCharge, targetWeighings, compositionSig, basisFromWeighings } from './public/calc.mjs';
+import { calcCharge, targetWeighings, compositionSig, basisFromWeighings, archivedNames, archivedMessage } from './public/calc.mjs';
 import { COND_FIELDS, JUDGEMENTS, MAX_ZONES, MAX_EXTRAS, MAX_ITEMS } from './public/fields.mjs';
-import { toCsv } from './public/matrix.mjs';
+import { toCsv, toMatrixCsv, sortForCompare } from './public/matrix.mjs';
 
 export class HttpError extends Error {
   // code: 画面側で回復手段を出し分けるための識別子（例: 'stale' = 他の人が先に保存した）
@@ -228,12 +228,20 @@ export function closeDb() {
 }
 
 const str = v => (v ?? '').toString().trim();
+const MAX_CODE = 64;   // サンプル番号の長さの上限（CSV のファイル名にも使うため）
 const num = v => (v === '' || v === null || v === undefined) ? NaN : Number(v);
 const list = (v, max, label) => {
   const a = Array.isArray(v) ? v : [];
   if (a.length > max) throw new HttpError(400, `${label}は ${max} 行までです`);
   return a;
 };
+
+// URL などから来た id。正の整数でなければ 400（NaN のまま渡すと SQL では NULL になり、絞り込みが外れる）
+export function positiveId(v, label) {
+  const n = Number(v);
+  if (!Number.isSafeInteger(n) || n <= 0) throw new HttpError(400, `${label}の指定が不正です`);
+  return n;
+}
 
 // 読み取りを1つのスナップショットで行う（途中で他の人が書き換えても食い違わないように）
 function readTx(fn) {
@@ -465,7 +473,7 @@ export function listSamples(f = {}, { limit = null, asc = false } = {}) {
     ORDER BY s.made_on ${dir}, s.id ${dir}
     LIMIT :limit
   `).all({
-    recipe: f.recipe ? Number(f.recipe) : null,
+    recipe: f.recipe ? positiveId(f.recipe, '配合') : null,
     from: f.from || null,
     to: f.to || null,
     judgement: f.judgement || null,
@@ -482,6 +490,20 @@ export function samplesCsv(f) {
   return readTx(() => toCsv(listSamples(f, { asc: true }).map(s => getSample(s.id)), BARREL_ZONES));
 }
 
+/**
+ * 選んだサンプルの比較表（項目 × サンプル）の CSV。サンプル記録画面の1件分もこれで出す。
+ * 他の人が削除したサンプルは飛ばす（比較画面と同じ）。1件も読めなければ 404
+ */
+export function compareCsv(ids, { onlyDiff = false } = {}) {
+  return readTx(() => {
+    const samples = ids.flatMap(id => {
+      try { return [getSample(id)]; } catch (e) { if (e.status === 404) return []; throw e; }
+    });
+    if (!samples.length) throw new HttpError(404, 'サンプルが見つかりません');
+    return { samples, csv: toMatrixCsv(sortForCompare(samples), BARREL_ZONES, { onlyDiff }) };
+  });
+}
+
 // 自由項目で過去に使った項目名。入力候補に出して表記ゆれ（MFR / mfr など）を減らす
 export function listExtraLabels() {
   return db.prepare(`
@@ -493,6 +515,7 @@ export function listExtraLabels() {
 function validateSample(input) {
   const code = str(input.code);
   if (!code) throw new HttpError(400, 'サンプル番号を入力してください');
+  if (code.length > MAX_CODE) throw new HttpError(400, `サンプル番号は ${MAX_CODE} 文字までです`);
   const createdBy = str(input.created_by);
   const qty = num(input.total_qty_g);
   if (!(qty > 0)) throw new HttpError(400, '作成量は 0 より大きい値を入力してください');
@@ -552,6 +575,8 @@ export function saveSample(input, id = null) {
       if (compositionSig(r.base_material_id, r.items) !== input.recipe_sig) {
         throw new HttpError(409, 'この配合の組成が、画面を開いた後に変更されました。最新の配合で狙い量を取り直したので、確認してから保存し直してください', 'recipe_changed');
       }
+      const stopped = archivedNames(r, db.prepare('SELECT name, archived FROM materials WHERE id = ?').get(r.base_material_id));
+      if (stopped.length) throw new HttpError(409, archivedMessage(stopped, r.sample_count), 'archived');
       recipeId = r.id;
       baseId = r.base_material_id;
       basis = r.items;
@@ -627,6 +652,13 @@ export function deleteSample(id, input) {
   const changedBy = str(input?.changed_by);
   if (!changedBy) throw new HttpError(400, '削除する人の名前を入力してください');
   return tx(() => {
+    // 他の人が直した後の版を、古い画面を見たまま消さない（更新と同じく version で検知する）
+    const cur = db.prepare('SELECT version FROM samples WHERE id = ?').get(id);
+    if (!cur) throw new HttpError(404, 'サンプルが見つかりません');
+    if (!Number.isInteger(input.version)) throw new HttpError(400, '削除する版（version）を指定してください');
+    if (cur.version !== input.version) {
+      throw new HttpError(409, '他の人がこのサンプルを先に保存しました。最新の内容を読み直してから削除してください', 'stale');
+    }
     recordHistory(id, 'delete', changedBy);
     db.prepare('DELETE FROM samples WHERE id = ?').run(id);
     return { ok: true };

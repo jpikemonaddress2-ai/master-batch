@@ -1,11 +1,11 @@
 // 画面2: サンプル記録
-import { targetWeighings, calcActual, weighOutliers, compositionSig, basisFromWeighings, WEIGH_TOLERANCE } from './calc.mjs';
+import { targetWeighings, calcActual, weighOutliers, compositionSig, basisFromWeighings, archivedMessage, WEIGH_TOLERANCE } from './calc.mjs';
 import { COND_FIELDS, JUDGEMENTS } from './fields.mjs';
 import { fmtDelta } from './format.mjs';
 import { buildMatrix } from './matrix.mjs';
 import {
   $, esc, fmt, fmtGram, fmtVal, toNum, alertBox, api, toast, state, matById, recipeById, reloadMasters,
-  createDirty, rememberedAuthor, rememberAuthor, today, showAlertWithAction,
+  createDirty, rememberedAuthor, rememberAuthor, today, showAlertWithAction, archivedInRecipe, stopOnBadNumber, setIfChanged,
 } from './common.js';
 
 const RECENT = 50;     // 左の一覧に出す件数
@@ -137,7 +137,8 @@ function openDraft(d) {
 function drawRecipeSelect() {
   const sel = $('#sRecipe');
   sel.innerHTML = state.recipes.length
-    ? state.recipes.map(r => `<option value="${r.id}" ${r.id === draft.recipe_id ? 'selected' : ''}>${esc(r.code)} — ${esc(r.name)}</option>`).join('')
+    ? state.recipes.map(r => `<option value="${r.id}" ${r.id === draft.recipe_id ? 'selected' : ''}>${esc(r.code)} — ${esc(r.name)}${
+      archivedInRecipe(r).length ? '（使用停止の原料を含む）' : ''}</option>`).join('')
     : '<option value="">（先に「配合」タブで配合を登録してください）</option>';
   // 既存サンプルの配合は変えられない（秤量のスナップショットが配合に紐づくため）
   sel.disabled = draft.id !== null || !state.recipes.length;
@@ -160,6 +161,8 @@ function drawForm() {
   const isNew = draft.id === null;
   $('#sDelete').hidden = isNew;
   $('#sCopy').hidden = isNew;
+  $('#sCsv').hidden = isNew;
+  if (!isNew) $('#sCsv').href = `/api/samples/compare.csv?ids=${draft.id}`;
   // 記入者は作成時に確定する。既存サンプルを直す人は「変更者」として毎回名前を残す
   $('#sBy').disabled = !isNew;
   $('#sEditorField').hidden = isNew;
@@ -295,10 +298,18 @@ function calcSample() {
     <div><div class="k">狙い総量</div><div class="v">${fmtGram(qty)}<small>g</small></div></div>
     <div><div class="k">実測総量${a.entered ? '' : '（未入力）'}</div><div class="v">${a.entered ? fmtGram(a.total) : '—'}<small>g</small></div></div>
     <div><div class="k">総量差（実測−狙い）</div><div class="v">${a.entered ? fmtDelta(diff, 1) : '—'}<small>g</small></div></div>`;
-  $('#sWeighAlert').innerHTML =
-    (over ? alertBox('配合過剰: 添加剤の合計が作成量を超えています。作成量を見直してください。') : '') +
-    (outliers.size ? `<div class="warn">実秤量が狙い量から ${WEIGH_TOLERANCE * 100}% 以上ずれている行があります（桁の打ち間違いがないか確認してください）。</div>` : '');
-  $('#sSave').disabled = $('#sSaveNext').disabled = over;
+  // 新規のときだけ。保存済みのサンプルはスナップショットで計算するので、原料の使用停止は関係ない
+  const r = draft.id === null ? recipeById(draft.recipe_id) : null;
+  const stopped = r ? archivedInRecipe(r) : [];
+  setIfChanged($('#sWeighAlert'),
+    (stopped.length ? alertBox(`${archivedMessage(stopped, r.sample_count)}。`, { live: false }) : '') +
+    (over ? alertBox('配合過剰: 添加剤の合計が作成量を超えています。作成量を見直してください。', { live: false }) : '') +
+    (outliers.size ? `<div class="warn">実秤量が狙い量から ${WEIGH_TOLERANCE * 100}% 以上ずれている行があります（桁の打ち間違いがないか確認してください）。</div>` : ''));
+  // 保存できない理由は、保存ボタンの横にも出す（秤量表の下の警告は、ボタンまでスクロールすると見えない）
+  const why = stopped.length ? '使用停止の原料を含む配合のため保存できません（秤量表の下を参照）'
+    : over ? '配合過剰のため保存できません（秤量表の下を参照）' : '';
+  $('#sSaveWhy').textContent = why;
+  $('#sSave').disabled = $('#sSaveNext').disabled = !!why;
 }
 
 /* ---------- 自由項目 ---------- */
@@ -371,24 +382,17 @@ async function reloadAfterChange() {
 
 // 保存が競合したときの回復。入力中の内容をできるだけ残す
 async function recoverFromConflict(e) {
-  if (e.code === 'recipe_changed') {
-    // 他の人が配合を変えた: 最新の配合で狙い量を取り直す（実秤量・ロットは残す）。
-    // reloadMasters が masters-changed を発火し、新規の下書きの狙い量を作り直す
-    const before = new Map(draft.basis.items.map(i => [`additive:${i.material_id}`, `${i.target_active_pct}/${i.active_pct}`]));
-    const beforeBase = draft.basis.base_material_id;
+  if (e.code === 'recipe_changed' || e.code === 'archived') {
+    // 他の人が配合を変えた・原料を使用停止にした: 配合を読み直す。
+    // 狙い量の取り直しと変わった行の色付けは syncNewDraft がする（実秤量・ロットは残す）
+    let shown;
     try {
-      await reloadMasters();
+      shown = await reloadMastersAndSync({ force: true });
     } catch (err) {
       $('#sAlert').innerHTML = alertBox(`${e.message}（配合の読み直しに失敗しました: ${err.message}）`);
       return;
     }
-    const now = new Map(draft.basis.items.map(i => [`additive:${i.material_id}`, `${i.target_active_pct}/${i.active_pct}`]));
-    draft.changed = new Set([...now].filter(([k, v]) => before.get(k) !== v).map(([k]) => k));
-    if (draft.basis.base_material_id !== beforeBase) draft.changed.add(`base:${draft.basis.base_material_id}`);
-    const dropped = [...before.keys()].filter(k => !now.has(k) && Number.isFinite(draft.actuals[k]));
-    drawWeigh();
-    $('#sAlert').innerHTML = alertBox(e.message + (dropped.length ? `（配合から外れた添加剤 ${dropped.length} 行の実秤量は使われません）` : '') +
-      '。変わった行を色付けしています。');
+    if (!shown) $('#sAlert').innerHTML = alertBox(e.message);
   } else if (e.code === 'stale') {
     showAlertWithAction($('#sAlert'), e.message, '最新を読み直す（自分の変更は破棄）',
       () => openSample(draft.id, { force: true }));
@@ -415,6 +419,7 @@ async function runSave(next) {
     toast('変更はありません');
     return;
   }
+  if (stopOnBadNumber($('#tab-sample'), $('#sAlert'))) return;
   let changedBy = null;
   if (draft.id !== null) {
     changedBy = editorName();
@@ -460,13 +465,13 @@ $('#sDelete').onclick = async () => {
   if (!confirm(`サンプル「${draft.code}」を削除します（変更者: ${changedBy}）。\n一覧からは消えます。削除前の内容は「サンプル一覧」の「削除済みサンプル」から見られます。よろしいですか？`)) return;
   try {
     const recipe = recipeById(draft.recipe_id);
-    await api('DELETE', `/api/samples/${draft.id}`, { changed_by: changedBy });
+    await api('DELETE', `/api/samples/${draft.id}`, { changed_by: changedBy, version: draft.version });
     dirty.set(false);
     await reloadAfterChange();
     openDraft(blankDraft(recipe ?? state.recipes[0]));
     toast('削除しました');
   } catch (e) {
-    $('#sAlert').innerHTML = alertBox(e.message);
+    await recoverFromConflict(e);
   }
 };
 
@@ -534,6 +539,11 @@ $('#newSample').onclick = () => {
   openDraft(blankDraft(recipeById(draft?.recipe_id) ?? state.recipes[0]));
 };
 
+// CSV は保存済みの内容で出る。未保存の変更があるときは、その旨を確かめる
+$('#sCsv').onclick = e => {
+  if (dirty.get() && !confirm('保存していない変更は CSV に含まれません（保存済みの内容で出力します）。よろしいですか？')) e.preventDefault();
+};
+
 $('#addCond').onclick = () => addExtra('condition');
 $('#addMeas').onclick = () => addExtra('measurement');
 
@@ -564,18 +574,61 @@ $('#sRecipe').onchange = e => {
   drawWeigh();
 };
 
-// 配合が保存されたら、新規サンプルの狙い量も最新の配合で作り直す
+// 狙い量の比較用。行ごとの「狙い濃度/有効成分%」（ベース樹脂は空）
+const basisMap = b => new Map([[`base:${b.base_material_id}`, ''],
+  ...b.items.map(i => [`additive:${i.material_id}`, `${i.target_active_pct}/${i.active_pct}`])]);
+
+/**
+ * 新規の下書きの狙い量を、配合の最新の内容で作り直す。
+ * 入力中に他の人が組成を変えていたら、黙って差し替えず、変わった行を色付けして知らせる。
+ * @returns {boolean} 組成の変更を知らせたか
+ */
+function syncNewDraft({ force = false } = {}) {
+  const r = recipeById(draft.recipe_id) ?? (draft.recipe_id === null || !dirty.get() ? state.recipes[0] : null);
+  if (!r) return false;
+  const prev = draft.recipe_id === r.id ? draft.basis : null;
+  Object.assign(draft, { recipe_id: r.id, basis: basisFromRecipe(r) });
+  // 何も入力していなければ黙って最新にしてよい。保存しようとして止められたとき（force）は、どこが変わったかを示す
+  if (!prev || (!dirty.get() && !force)) return false;
+  const before = basisMap(prev), now = basisMap(draft.basis);
+  const changed = [...now].filter(([k, v]) => before.get(k) !== v).map(([k]) => k);
+  const removed = [...before.keys()].filter(k => !now.has(k));
+  if (!changed.length && !removed.length) return false;
+  // 色付けは、この下書きを開き直すか配合を選び直すまで残す（続けて2回変わっても、最初の変更の印を消さない）
+  changed.forEach(k => draft.changed.add(k));
+  const dropped = removed.filter(k => Number.isFinite(draft.actuals[k]));
+  const droppedAdd = dropped.filter(k => k.startsWith('additive:')).length;
+  const droppedBase = dropped.some(k => k.startsWith('base:'));
+  $('#sAlert').innerHTML = alertBox(`配合「${r.code}」の組成が、この画面を開いた後に変更されました。最新の配合で狙い量を取り直したので、色付けした行を確認してから保存してください` +
+    (droppedAdd ? `（配合から外れた添加剤 ${droppedAdd} 行の実秤量は使われません）` : '') +
+    (droppedBase ? '（ベース樹脂が変わったため、入力したベース樹脂の実秤量は使われません）' : '') + '。');
+  return true;
+}
+
+// reloadMastersAndSync から masters-changed のハンドラーへ渡す指定と、その結果
+let syncRun = { force: false, notified: false };
+
+/**
+ * 配合を読み直し、新規の下書きを最新の配合に合わせる。
+ * @returns {Promise<boolean>} 組成の変更を画面で知らせたか
+ */
+async function reloadMastersAndSync({ force = false } = {}) {
+  syncRun = { force, notified: false };
+  try {
+    // reloadMasters は masters-changed を dispatchEvent で同期に発火するので、戻った時点でハンドラーは済んでいる
+    await reloadMasters();
+    return syncRun.notified;
+  } finally {
+    syncRun = { force: false, notified: false };
+  }
+}
+
+// 配合・原料が保存されたら、新規サンプルの狙い量も最新の配合で作り直す
 document.addEventListener('masters-changed', () => {
   if (!draft) return;
-  if (draft.id === null) {
-    const r = recipeById(draft.recipe_id) ?? (draft.recipe_id === null || !dirty.get() ? state.recipes[0] : null);
-    if (r) Object.assign(draft, { recipe_id: r.id, basis: basisFromRecipe(r) });
-    drawRecipeSelect();
-    drawWeigh();
-  } else {
-    drawRecipeSelect();
-    drawWeigh();   // 原料の取扱注意の変更を反映
-  }
+  if (draft.id === null && syncNewDraft({ force: syncRun.force })) syncRun.notified = true;
+  drawRecipeSelect();
+  drawWeigh();   // 原料の取扱注意・使用停止の変更も反映する
 });
 
 /** 配合タブの「この配合でサンプルを作る」から呼ばれる。破棄を断られたら false */

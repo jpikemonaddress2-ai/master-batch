@@ -5,7 +5,7 @@
   --good:#146c43; --good-bg:#e4f4ea;
   --ok:#8a5a00;  --ok-bg:#fdf3e0;
   --ng:#b02a1f;  --ng-bg:#fdeceb;
-  --diff-bg:#fff6da; --diff-line:#e6c65c;
+  --diff-bg:#ffe7a3; --diff-line:#b98900; --diff-ink:#5c4300;
   --mono:"Consolas","SF Mono","Roboto Mono",monospace;
 }
 *{box-sizing:border-box}
@@ -65,7 +65,7 @@ button.primary{background:var(--accent); border-color:var(--accent); color:#fff}
 button.primary:hover{background:#1a51b0}
 button.link{background:none;border:0;color:var(--accent);cursor:pointer;font-family:inherit;font-size:12px;padding:2px 4px}
 button.del{color:var(--ng); border-color:#e8b4b0; background:#fff; padding:3px 8px; font-size:11px; border-radius:3px; cursor:pointer; font-family:inherit}
-.actions{display:flex; gap:8px; margin-top:14px; padding-top:12px; border-top:1px solid var(--line)}
+.actions{display:flex; flex-wrap:wrap; gap:8px; margin-top:14px; padding-top:12px; border-top:1px solid var(--line)}
 /* ---------- tables ---------- */
 table{border-collapse:collapse; width:100%; font-size:12.5px}
 th,td{border-bottom:1px solid var(--line); padding:6px 9px; text-align:left; vertical-align:middle}
@@ -113,7 +113,7 @@ tbody tr:hover{background:#f7f9fc}
   position:sticky; left:0; background:#fafbfc; font-weight:600; color:var(--muted);
   border-right:1px solid var(--line-strong); width:190px; font-size:11.5px;
 }
-.cmp tr.diff th[scope=row],.cmp tr.diff td:first-child{background:var(--diff-bg); color:#6b5200}
+.cmp tr.diff th[scope=row],.cmp tr.diff td:first-child{background:var(--diff-bg); color:var(--diff-ink); box-shadow:inset 4px 0 0 var(--diff-line)}
 .cmp tr.diff td{background:var(--diff-bg)}
 .cmp tr.diff{box-shadow:inset 0 0 0 1px var(--diff-line)}
 .cmp tr.grp th,.cmp tr.grp td{text-align:left; background:#20293a; color:#fff; font-weight:700; font-size:11px; letter-spacing:.06em; position:sticky; left:0}
@@ -185,4 +185,26 @@ tr.archived td{color:var(--sub)}
 .sr-only{position:absolute; width:1px; height:1px; overflow:hidden; clip:rect(0 0 0 0); white-space:nowrap}
 .cmp.hist th, .cmp.hist td{position:static}
 body.loading main{opacity:.5; pointer-events:none}
+
+/* ---------- 4回目のレビュー対応 ---------- */
+/* 差のある行の印（色だけに頼らない） */
+.diff-sign{display:inline-block; width:1.1em; font-weight:700; color:var(--diff-ink)}
+/* 数値として読めない入力（「4e」など。common.js が付ける）。保存の前にも止める */
+input.bad{border-color:var(--ng); background:var(--ng-bg)}
+.caution.block{display:block}
+/* 一覧のチェック列は、列全体を押せる */
+td.sel{cursor:default; text-align:center}
+td.sel input{width:18px; height:18px; vertical-align:middle}
+/* 手袋・タブレット（指で操作する端末）では、押せる所と入力欄を大きくする */
+@media (pointer: coarse){
+  input,select{min-height:40px; font-size:15px}
+  input[type=checkbox],input[type=radio]{width:24px; height:24px; min-height:0}
+  button.btn,a.btn{min-height:44px; padding:10px 16px; font-size:14px}
+  button.link{min-height:40px; padding:8px 10px; font-size:14px}
+  button.del{min-height:40px; padding:8px 14px; font-size:13px}
+  nav button{padding:14px 18px; font-size:14px}
+  td.sel{width:52px}
+  td.sel input{width:24px; height:24px}
+  fieldset.judge label{display:flex; align-items:center; gap:6px; min-height:44px; font-size:15px}
+}
 body:not(.loading) #loadingNote{display:none}

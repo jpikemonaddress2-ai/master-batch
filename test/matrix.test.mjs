@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildMatrix, toCsv } from '../public/matrix.mjs';
+import { buildMatrix, toCsv, toMatrixCsv } from '../public/matrix.mjs';
 
 function sample(over = {}) {
   return {
@@ -69,4 +69,22 @@ test('CSV: BOM付き、数式になる文字列には \' を前置、負の数�
   assert.ok(csv.includes('"\'=cmd|x"'));
   assert.ok(csv.includes('"-80"'));
   assert.ok(csv.includes('"L1"'));
+});
+
+test('変更履歴の差分: 配合名（表示のたびに配合から引く値）は差分にしない', () => {
+  const rows = buildMatrix([sample(), sample({ recipe_name: '改名後', memo: '追記' })], 2, { allDiff: true });
+  assert.deepEqual(rows.filter(r => r.diff).map(r => r.key), ['memo']);
+});
+
+test('比較表の CSV: 1行1項目。差のある行だけにしてもサンプル番号の行は残す', () => {
+  const lines = toMatrixCsv([sample(), sample({ id: 2, code: 'S-002', screw_rpm: 300 })], 2, { onlyDiff: true })
+    .replace('\ufeff', '').trim().split('\r\n');
+  assert.equal(lines[0], '"区分","項目","単位","差","S-001","S-002"');
+  assert.deepEqual(lines.slice(1).map(l => l.split(',')[1]), ['"サンプル番号"', '"作成日"', '"配合"', '"スクリュー回転数"', '"最終更新"']);
+});
+
+test('サンプル1件の CSV には「差」の列を付けない', () => {
+  const lines = toMatrixCsv([sample()], 2).replace('\ufeff', '').split('\r\n');
+  assert.equal(lines[0], '"区分","項目","単位","S-001"');
+  assert.ok(lines.includes('"造粒条件","ダイ温度（設定）","℃","195"'));
 });

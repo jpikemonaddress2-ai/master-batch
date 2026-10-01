@@ -3,7 +3,7 @@ import { calcCharge } from './calc.mjs';
 import { fmtRaw } from './format.mjs';
 import {
   $, esc, fmt, fmtGram, fmtVal, toNum, alertBox, api, toast, state, matById, recipeById, reloadMasters,
-  createDirty, showTab, showAlertWithAction, materialOptions, rememberedAuthor, rememberAuthor,
+  createDirty, showTab, showAlertWithAction, materialOptions, rememberedAuthor, rememberAuthor, archivedInRecipe, stopOnBadNumber, setIfChanged,
 } from './common.js';
 import { newSampleFor } from './sample.js';
 
@@ -38,6 +38,7 @@ function drawRecipeList() {
       ${r.sample_count ? `<span class="tag count" style="float:right" title="サンプル ${r.sample_count} 件">S ${r.sample_count}</span>` : ''}
       <span class="nm">${esc(r.name)}</span>
       <span class="meta">添加剤 ${r.items.length} 種 / ${Number(r.default_qty_g).toLocaleString()} g</span>
+      ${archivedInRecipe(r).length ? `<span class="caution block">⚠ 使用停止の原料を含む（${r.sample_count ? '複製して' : ''}置き換え）</span>` : ''}
     </button>`).join('');
   box.querySelectorAll('.list-item').forEach(el => el.onclick = () => {
     const r = state.recipes.find(x => x.id === Number(el.dataset.id));
@@ -132,9 +133,9 @@ function calcRecipe() {
     <div><div class="k">総量</div><div class="v">${fmtGram(W)}<small>g</small></div></div>
     <div><div class="k">仕込み比率（MB・キャリア込み）</div><div class="v">${fmt(W ? c.addTotal / W * 100 : 0, 2)}<small>wt%</small></div></div>
     <div><div class="k">有効成分 合計</div><div class="v">${fmtRaw(activeTotal) || '0'}<small>wt%</small></div></div>`;
-  $('#rAlert').innerHTML = c.over
-    ? alertBox(`配合過剰: 添加剤の合計 ${fmtGram(c.addTotal)} g が総量 ${fmtGram(W)} g を超えています。狙い濃度か作成量を見直してください。`)
-    : '';
+  setIfChanged($('#rAlert'), c.over
+    ? alertBox(`配合過剰: 添加剤の合計 ${fmtGram(c.addTotal)} g が総量 ${fmtGram(W)} g を超えています。狙い濃度か作成量を見直してください。`, { live: false })
+    : '');
   $('#save').disabled = c.over;
 }
 
@@ -213,6 +214,7 @@ document.addEventListener('masters-changed', () => {
 
 $('#save').onclick = async () => {
   $('#rSaveAlert').innerHTML = '';
+  if (stopOnBadNumber($('#tab-recipe'), $('#rSaveAlert'))) return;
   let changedBy = null;
   if (draft.id !== null) {
     changedBy = $('#rEditor').value.trim();

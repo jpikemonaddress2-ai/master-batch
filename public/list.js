@@ -57,7 +57,7 @@ function draw() {
   drawCount();
   $('#lRows').innerHTML = rows.length ? rows.map(s => `
     <tr data-id="${s.id}" class="clickable">
-      <td><input type="checkbox" data-c="${s.id}" ${selected.has(s.id) ? 'checked' : ''} aria-label="${esc(s.code)} を選択"></td>
+      <td class="sel"><input type="checkbox" data-c="${s.id}" ${selected.has(s.id) ? 'checked' : ''} aria-label="${esc(s.code)} を選択"></td>
       <td><button type="button" class="link code-link">${esc(s.code)}</button></td>
       <td>${esc(s.made_on ?? '')}</td>
       <td>${esc(s.recipe_code)} <span style="color:var(--sub)">${esc(s.recipe_name)}</span></td>
@@ -75,9 +75,13 @@ function draw() {
     el.checked ? selected.add(id) : selected.delete(id);
     drawCount();
   });
-  // 行（またはサンプル番号のボタン）でサンプル記録を開く。チェックボックスは除く
+  // 行（またはサンプル番号のボタン）でサンプル記録を開く。
+  // チェックボックスの列は、押し損ねても別の画面へ移らないよう、列のどこを押してもチェックの切り替えにする
   $('#lRows').querySelectorAll('tr[data-id]').forEach(tr => tr.onclick = async e => {
-    if (e.target.closest('input')) return;
+    if (e.target.closest('td.sel')) {
+      if (!e.target.closest('input')) tr.querySelector('input[data-c]').click();
+      return;
+    }
     if (await openSample(Number(tr.dataset.id))) showTab('sample');
   });
 }

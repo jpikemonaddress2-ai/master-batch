@@ -64,7 +64,7 @@
         </div>
 
         <div class="summary" id="rSummary"></div>
-        <div id="rAlert"></div>
+        <div id="rAlert" aria-live="polite"></div>
 
         <div class="field" style="margin-top:14px">
           <label for="rMemo">メモ</label><textarea id="rMemo"></textarea>
@@ -124,7 +124,7 @@
           </table>
         </div>
         <div class="summary" id="sSummary"></div>
-        <div id="sWeighAlert"></div>
+        <div id="sWeighAlert" aria-live="polite"></div>
 
         <div class="sub-h">造粒条件 — バレル温度（設定値, ℃）</div>
         <div class="zones" id="sZones"></div>
@@ -169,11 +169,13 @@
         <div id="sAlert"></div>
         <div class="actions" style="align-items:flex-end">
           <div class="field" id="sEditorField"><label for="sEditor">変更者（履歴に残ります）</label><input class="w-md" id="sEditor"></div>
-          <button class="btn primary" id="sSave">保存</button>
+          <button class="btn primary" id="sSave" aria-describedby="sSaveWhy">保存</button>
           <button class="btn" id="sSaveNext">保存して続けて新規</button>
           <button class="btn" id="sCopy">このサンプルを元に新規作成</button>
+          <a class="btn" id="sCsv" download hidden>このサンプルをCSVエクスポート</a>
           <button class="btn danger" id="sDelete" style="margin-left:auto">削除</button>
         </div>
+        <div class="hint" id="sSaveWhy" aria-live="polite"></div>
         <div id="sHistory"></div>
       </div>
     </div>
@@ -224,9 +226,10 @@
     <div class="bar">
       <label style="font-size:12px"><input type="checkbox" id="cOnlyDiff"> 差のある行だけ表示</label>
       <span class="hint" id="cNote" style="padding:0"></span>
+      <a class="btn" id="cCsv" download hidden style="margin-left:auto">表示中の比較表をCSVエクスポート</a>
     </div>
     <div class="wrapper"><table class="cmp"><tbody id="cRows"></tbody></table></div>
-    <div class="legend"><span><span class="swatch"></span>値が揃っていない行（＝振った条件・出た差）</span></div>
+    <div class="legend"><span><span class="swatch"></span><span class="diff-sign" aria-hidden="true">≠</span>値が揃っていない行（＝振った条件・出た差）</span></div>
   </div>
 </section>
 

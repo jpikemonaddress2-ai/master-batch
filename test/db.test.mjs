@@ -121,7 +121,7 @@ test('作成日は必須', () => {
 test('削除したサンプルの id と番号は再利用しない（履歴が別のサンプルに付かない）', () => {
   const { sample } = setup();
   const a = sample();
-  store.deleteSample(a.id, { changed_by: '佐藤' });
+  store.deleteSample(a.id, { changed_by: '佐藤', version: a.version });
   const b = sample();
   assert.notEqual(b.id, a.id);
   assert.deepEqual(store.listHistory(b.id), []);
@@ -135,7 +135,7 @@ test('記入者は更新で変わらず、更新・削除の前の内容が履�
   const upd = store.saveSample({ ...asInput(s), created_by: '別人', judgement: 'ng', changed_by: '佐藤' }, s.id);
   assert.equal(upd.created_by, '津田');
   assert.throws(() => store.saveSample({ ...asInput(upd), changed_by: '' }, s.id), e => e.status === 400);
-  store.deleteSample(s.id, { changed_by: '佐藤' });
+  store.deleteSample(s.id, { changed_by: '佐藤', version: upd.version });
   const h = store.listHistory(s.id);
   assert.deepEqual(h.map(x => [x.op, x.changed_by]), [['delete', '佐藤'], ['update', '佐藤']]);
   assert.equal(h[1].snapshot.judgement, null);
@@ -148,4 +148,44 @@ test('ゾーン数より多く記録されたバレル温度は、保存し直�
   const s = sample({ barrel_temps: temps });
   const again = store.saveSample({ ...asInput(s), memo: 'x', changed_by: 'A' }, s.id);
   assert.deepEqual(again.barrel_temps, temps);
+});
+
+test('同時編集: 他の人が直した後の版を、古い version で削除できない', () => {
+  const { sample } = setup();
+  const s = sample();
+  store.saveSample({ ...asInput(s), memo: 'A', changed_by: 'A' }, s.id);
+  assert.throws(() => store.deleteSample(s.id, { changed_by: 'B', version: s.version }), e => e.code === 'stale');
+  assert.throws(() => store.deleteSample(999999, { changed_by: 'B', version: 1 }), e => e.status === 404);
+  // version を付けない削除は「他の人が先に保存した」と紛らわしいので 400 にする
+  assert.throws(() => store.deleteSample(s.id, { changed_by: 'B' }), e => e.status === 400);
+});
+
+test('使用停止の原料を含む配合からは新しいサンプルを作れない（既存のサンプルは直せる）', () => {
+  const { mb, sample } = setup();
+  const s = sample();
+  store.updateMaterial(mb.id, { ...mb, archived: true });
+  assert.throws(() => sample(), e => e.code === 'archived' && e.message.includes(mb.name));
+  assert.ok(store.saveSample({ ...asInput(s), memo: '追記', changed_by: 'A' }, s.id).id);
+
+  // ベース樹脂の使用停止も同じ
+  const other = setup();
+  store.updateMaterial(other.resin.id, { ...other.resin, archived: true });
+  assert.throws(() => other.sample(), e => e.code === 'archived');
+});
+
+test('一覧の配合の絞り込みに数値でない値を渡すと 400（絞り込みなしの全件にしない）', () => {
+  assert.throws(() => store.listSamples({ recipe: 'abc' }), e => e.status === 400);
+});
+
+test('比較表の CSV: 作成日の順に並べ、削除済みのサンプルは飛ばす', () => {
+  const { sample } = setup();
+  const late = sample({ made_on: '2026-10-05', screw_rpm: 300 });
+  const early = sample({ made_on: '2026-10-02', screw_rpm: 200 });
+  const gone = sample();
+  store.deleteSample(gone.id, { changed_by: 'A', version: gone.version });
+  const { samples, csv } = store.compareCsv([late.id, gone.id, early.id]);
+  assert.deepEqual(samples.map(s => s.id).sort(), [early.id, late.id].sort());
+  const header = csv.replace('\ufeff', '').split('\r\n')[0];
+  assert.equal(header, `"区分","項目","単位","差","${early.code}","${late.code}"`);
+  assert.throws(() => store.compareCsv([gone.id]), e => e.status === 404);
 });
