@@ -123,7 +123,7 @@ test('CSV: 単位がサンプル間で違う項目は、値（数値だけ）と
   const a = sample({ extras: [{ category: 'measurement', label: '粘度', value: '10', unit: 'Pa·s' }] });
   const b = sample({ id: 2, code: 'S-002', extras: [{ category: 'measurement', label: '粘度', value: '10000', unit: 'mPa·s' }] });
   const c = sample({ id: 3, code: 'S-003' });
-  const [head, ...lines] = toCsv([a, b, c], 2).replace('﻿', '').trim().split('\r\n').map(l => l.split(','));
+  const [head, ...lines] = toCsv([a, b, c], 2).replace('\ufeff', '').trim().split('\r\n').map(l => l.split(','));
   const v = head.indexOf(`"測定:粘度 (${MIXED_UNIT})"`);
   const u = head.indexOf('"測定:粘度［単位］"');
   assert.ok(v >= 0 && u === v + 1);
@@ -139,18 +139,41 @@ test('比較の CSV（差のある行だけ）: 数値が同じでも単位が�
   assert.ok(csv.includes('"測定値","粘度［単位］","","有","Pa·s","mPa·s",""'));
 });
 
-test('CSV: 値はあるのに単位が空のセルは（未記入）と出し、値の空欄と見分ける', () => {
+test('CSV: 値はあるのに単位が空のセルは（単位なし）と出し、値の空欄と見分ける', () => {
   const a = sample({ extras: [{ category: 'measurement', label: 'MFR', value: '1.2', unit: 'g/10min' }] });
   const b = sample({ id: 2, code: 'S-002', extras: [{ category: 'measurement', label: 'MFR', value: '1.5', unit: '' }] });
   const row = buildMatrix([a, b], 2, { csv: true }).find(r => r.key.endsWith(':unit'));
-  assert.deepEqual(row.cells, ['g/10min', '（未記入）']);
+  assert.deepEqual(row.cells, ['g/10min', '（単位なし）']);
 });
 
 test('CSV: 単位を値に書いたサンプルと単位欄に書いたサンプルは、見た目が同じでも差にする', () => {
   const a = sample({ extras: [{ category: 'measurement', label: '粘度', value: '10 Pa·s', unit: '' }] });
-  const b = sample({ id: 2, extras: [{ category: 'measurement', label: '粘度', value: '10', unit: 'Pa·s' }] });
+  const b = sample({ id: 2, code: 'S-002', extras: [{ category: 'measurement', label: '粘度', value: '10', unit: 'Pa·s' }] });
   const rows = buildMatrix([a, b], 2, { csv: true }).filter(r => r.group === 'measurement');
   assert.deepEqual(rows.map(r => r.diff), [true, true]);
+  // 画面の比較表も同じ判定にする（「差のある行だけ」に出る行を CSV とそろえる）
+  const screen = buildMatrix([a, b], 2).find(r => r.label === '粘度');
+  assert.deepEqual(screen.cells, ['10 Pa·s', '10 Pa·s']);
+  assert.equal(screen.diff, true);
+});
+
+test('比較の CSV（差のある行だけ）: 単位が同じ並びで数値だけ違っても、単位の行も一緒に残す', () => {
+  const ex = (value, unit) => ({ extras: [{ category: 'measurement', label: '粘度', value, unit }] });
+  const csv = toMatrixCsv([sample(ex('10', 'Pa·s')), sample({ id: 2, code: 'S-002', ...ex('20', 'Pa·s') }),
+    sample({ id: 3, code: 'S-003', ...ex('30', 'mPa·s') }), sample({ id: 4, code: 'S-004', ...ex('40', 'mPa·s') })], 2, { onlyDiff: true });
+  assert.ok(csv.includes('"測定値","粘度［単位］","","有","Pa·s","Pa·s","mPa·s","mPa·s"'));
+});
+
+test('CSV: 単位の「-」1文字は \' を付けずにそのまま出す', () => {
+  const a = sample({ extras: [{ category: 'measurement', label: 'YI', value: '1.2', unit: '-' }] });
+  const b = sample({ id: 2, code: 'S-002', extras: [{ category: 'measurement', label: 'YI', value: '1.5', unit: '' }] });
+  const csv = toMatrixCsv([a, b], 2);
+  assert.ok(csv.includes('"測定値","YI［単位］","","有","-","（単位なし）"'));
+});
+
+test('組の情報（pair）は返す行に残さない', () => {
+  const rows = buildMatrix([sample()], 2, { csv: true });
+  assert.ok(rows.every(r => !('pair' in r)));
 });
 
 test('CSV: 単位が揃っていれば、これまでどおり見出しに単位を付けて1列にする', () => {

@@ -15,9 +15,10 @@ export const GROUPS = [
 ];
 
 // CSV で単位がサンプル間で揃わない項目の、値の行の単位欄。単位そのものは「◯◯［単位］」の行に出す
-export const MIXED_UNIT = '単位混在（［単位］を参照）';
-// CSV の単位の行で、値はあるのに単位が空のセル（値が空のセルと見分けるため）
-const UNIT_BLANK = '（未記入）';
+export const MIXED_UNIT = '単位混在・［単位］列を参照';
+// CSV の単位の行で、値はあるのに単位が空のセル（値が空のセルと見分けるため）。
+// pH や色差など単位の無い量もあるので「記入漏れ」とは書かない
+const UNIT_BLANK = '（単位なし）';
 
 const s2 = v => (v === null || v === undefined) ? '' : String(v);
 
@@ -28,7 +29,7 @@ const s2 = v => (v === null || v === undefined) ? '' : String(v);
  * @returns {{group:string, key:string, label:string, unit:string, value:string, noDiff?:boolean, stamp?:boolean, pair?:string, live?:boolean}[]}
  *   noDiff: 値が違って当然の項目（サンプル番号など）。比較表では差分扱いしない（変更履歴の差分では扱う）
  *   stamp: 記録日時。保存のたびに変わるので、変更履歴の差分でも扱わない
- *   pair: 組で1つの値になる行の組の名前（buildMatrix で差を連動させる）
+ *   pair: 組で1つの値になる行の組の名前（buildMatrix で差を連動させる）。名前は組の代表の行の key にする
  *   live: サンプルの記録ではなく、表示のたびに配合から引く値（配合名）。
  *         配合の名前を変えるとサンプルの履歴の差分に紛れ込むので、変更履歴の差分では扱わない
  */
@@ -65,7 +66,7 @@ export function sampleEntries(s, zones, { csv = false } = {}) {
     add('weigh', `${k}:lot`, `${n} ロット`, '', w.lot);
     add('weigh', `${k}:target_g`, `${n} 狙い量`, 'g', fmtG(w.target_g));
     add('weigh', `${k}:actual`, `${n} 実秤量`, 'g', fmtRaw(w.actual_g));
-    add('weigh', `${k}:real`, `${n} 実濃度`, 'wt%', real(w), { pair: `${k}:real` });
+    add('weigh', `${k}:real`, `${n} 実濃度`, 'wt%', real(w), csv ? { pair: `${k}:real` } : {});
     if (csv) add('weigh', `${k}:real_kind`, `${n} 実濃度の区分`, '', realNum(w) === '' ? '' : w.estimated ? '推定' : '実測', { pair: `${k}:real` });
   }
 
@@ -112,6 +113,10 @@ export function sampleEntries(s, zones, { csv = false } = {}) {
 export function buildMatrix(samples, zones, { allDiff = false, csv = false } = {}) {
   const per = samples.map(s => new Map(sampleEntries(s, zones, { csv }).map(e => [e.key, e])));
   const rows = [];
+  const pairOf = new Map();   // 行 → 組の名前（sampleEntries の pair を参照）
+  const push = (row, pair) => { rows.push(row); if (pair) pairOf.set(row, pair); };
+  // 片方だけ空の場合も差とみなす
+  const differs = cells => new Set(cells).size > 1;
   for (const g of GROUPS) {
     const keys = [];
     const meta = new Map();
@@ -125,31 +130,34 @@ export function buildMatrix(samples, zones, { allDiff = false, csv = false } = {
       const m = meta.get(key);
       const counts = allDiff ? !(m.stamp || m.live) : !m.noDiff;
       const vals = es.map(e => e ? e.value : '');
-      // 単位の空欄も1つの単位として数える（空欄の値を、他のサンプルの単位で記録したように見せない）
-      const units = new Set(es.filter(e => e && e.value !== '').map(e => e.unit));
+      // 値の無いセルは単位も無いものとする。単位の空欄も1つの単位として数える
+      // （空欄の値を、他のサンプルの単位で記録したように見せない）
+      const unitOf = es.map((e, i) => vals[i] === '' ? '' : e.unit);
+      const units = new Set(unitOf.filter((u, i) => vals[i] !== ''));
+      // 差は値と単位を別々に比べる（「10 Pa·s」を値に書いたサンプルと、値 10・単位 Pa·s のサンプルも差にする）。
+      // 画面と CSV で同じ判定にして、「差のある行だけ」に出る行をそろえる
+      const valDiff = counts && differs(vals);
+      const unitDiff = counts && differs(unitOf);
       if (units.size > 1 && csv) {
         // CSV では値に単位を付けると表計算で数値にならないので、値と単位を別の行に分ける。
         // 値の行には単位が混ざっていることを示し、単位の無い数値として集計されないようにする
-        const unitCells = es.map((e, i) => vals[i] === '' ? '' : (e.unit || UNIT_BLANK));
-        const diff = counts && (new Set(vals).size > 1 || new Set(unitCells).size > 1);
-        rows.push({ group: g.id, key, label: m.label, unit: MIXED_UNIT, cells: vals, diff, pair: key });
-        rows.push({ group: g.id, key: `${key}:unit`, label: `${m.label}［単位］`, unit: '', cells: unitCells, diff, pair: key });
+        const pair = m.pair ?? key;
+        push({ group: g.id, key, label: m.label, unit: MIXED_UNIT, cells: vals, diff: valDiff }, pair);
+        push({ group: g.id, key: `${key}:unit`, label: `${m.label}［単位］`, unit: '',
+          cells: unitOf.map((u, i) => vals[i] === '' ? '' : (u || UNIT_BLANK)), diff: unitDiff }, pair);
         continue;
       }
       const shared = units.size <= 1;
       const unit = shared ? ([...units][0] ?? m.unit) : '';
-      const cells = es.map((e, i) => (vals[i] === '' || shared || !e.unit) ? vals[i] : `${vals[i]} ${e.unit}`);
-      rows.push({ group: g.id, key, label: m.label, unit, cells, diff: counts && new Set(cells).size > 1, pair: m.pair });
+      const cells = vals.map((v, i) => (v === '' || shared || !unitOf[i]) ? v : `${v} ${unitOf[i]}`);
+      push({ group: g.id, key, label: m.label, unit, cells, diff: valDiff || unitDiff }, m.pair);
     }
   }
   // 組で1つの値になる行（CSV の実濃度と区分、単位の揃わない値と単位）は、どれかに差があれば全部を差とし、
   // 「差のある行だけ」でも片方だけ残らないようにする（区分や単位が落ちると、値を取り違える）
-  const pairs = new Map();
-  for (const r of rows) if (r.pair) pairs.set(r.pair, (pairs.get(r.pair) ?? false) || r.diff);
-  for (const r of rows) {
-    if (r.pair) r.diff = pairs.get(r.pair);
-    delete r.pair;
-  }
+  const pairDiff = new Map();
+  for (const [r, p] of pairOf) pairDiff.set(p, pairDiff.get(p) || r.diff);
+  for (const [r, p] of pairOf) r.diff = pairDiff.get(p);
   return rows;
 }
 
@@ -168,8 +176,9 @@ export function visibleRows(rows, onlyDiff) {
 
 const csvCell = v => {
   let s = s2(v);
-  // 表計算ソフトで数式として実行されないようにする（負の数などの数値はそのまま）。全角の記号も対象にする
-  if (/^[=+\-@\t\r＝＋－＠]/.test(s) && !Number.isFinite(Number(s))) s = `'${s}`;
+  // 表計算ソフトで数式として実行されないようにする（負の数などの数値はそのまま）。全角の記号も対象にする。
+  // 「-」1文字（無次元の単位などに使う）は数式にならないので、そのまま出す
+  if (/^[=+\-@\t\r＝＋－＠]/.test(s) && !Number.isFinite(Number(s)) && !/^[-－]$/.test(s)) s = `'${s}`;
   return `"${s.replace(/"/g, '""')}"`;
 };
 
