@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildMatrix, toCsv, toMatrixCsv } from '../public/matrix.mjs';
+import { buildMatrix, toCsv, toMatrixCsv, MIXED_UNIT } from '../public/matrix.mjs';
 
 function sample(over = {}) {
   return {
@@ -117,4 +117,45 @@ test('比較の CSV（差のある行だけ）: 実濃度の数値に差があ�
   const lines = toMatrixCsv([sample({ weighings: w(40) }), sample({ id: 2, code: 'S-002', weighings: w(44) })], 2, { onlyDiff: true });
   assert.match(lines, /"AO 実濃度","wt%","有"/);
   assert.match(lines, /"AO 実濃度の区分","","有","推定","推定"/);
+});
+
+test('CSV: 単位がサンプル間で違う項目は、値（数値だけ）と単位を別の列に分け、値の列に単位混在と示す', () => {
+  const a = sample({ extras: [{ category: 'measurement', label: '粘度', value: '10', unit: 'Pa·s' }] });
+  const b = sample({ id: 2, code: 'S-002', extras: [{ category: 'measurement', label: '粘度', value: '10000', unit: 'mPa·s' }] });
+  const c = sample({ id: 3, code: 'S-003' });
+  const [head, ...lines] = toCsv([a, b, c], 2).replace('﻿', '').trim().split('\r\n').map(l => l.split(','));
+  const v = head.indexOf(`"測定:粘度 (${MIXED_UNIT})"`);
+  const u = head.indexOf('"測定:粘度［単位］"');
+  assert.ok(v >= 0 && u === v + 1);
+  assert.deepEqual(lines.map(l => [l[v], l[u]]), [['"10"', '"Pa·s"'], ['"10000"', '"mPa·s"'], ['""', '""']]);
+});
+
+test('比較の CSV（差のある行だけ）: 数値が同じでも単位が違えば差とし、単位の行も一緒に残す', () => {
+  const a = sample({ extras: [{ category: 'measurement', label: '粘度', value: '10', unit: 'Pa·s' }] });
+  const b = sample({ id: 2, code: 'S-002', extras: [{ category: 'measurement', label: '粘度', value: '10', unit: 'mPa·s' }] });
+  const c = sample({ id: 3, code: 'S-003' });
+  const csv = toMatrixCsv([a, b, c], 2, { onlyDiff: true });
+  assert.ok(csv.includes(`"測定値","粘度","${MIXED_UNIT}","有","10","10",""`));
+  assert.ok(csv.includes('"測定値","粘度［単位］","","有","Pa·s","mPa·s",""'));
+});
+
+test('CSV: 値はあるのに単位が空のセルは（未記入）と出し、値の空欄と見分ける', () => {
+  const a = sample({ extras: [{ category: 'measurement', label: 'MFR', value: '1.2', unit: 'g/10min' }] });
+  const b = sample({ id: 2, code: 'S-002', extras: [{ category: 'measurement', label: 'MFR', value: '1.5', unit: '' }] });
+  const row = buildMatrix([a, b], 2, { csv: true }).find(r => r.key.endsWith(':unit'));
+  assert.deepEqual(row.cells, ['g/10min', '（未記入）']);
+});
+
+test('CSV: 単位を値に書いたサンプルと単位欄に書いたサンプルは、見た目が同じでも差にする', () => {
+  const a = sample({ extras: [{ category: 'measurement', label: '粘度', value: '10 Pa·s', unit: '' }] });
+  const b = sample({ id: 2, extras: [{ category: 'measurement', label: '粘度', value: '10', unit: 'Pa·s' }] });
+  const rows = buildMatrix([a, b], 2, { csv: true }).filter(r => r.group === 'measurement');
+  assert.deepEqual(rows.map(r => r.diff), [true, true]);
+});
+
+test('CSV: 単位が揃っていれば、これまでどおり見出しに単位を付けて1列にする', () => {
+  const ex = value => ({ extras: [{ category: 'measurement', label: 'MFR', value, unit: 'g/10min' }] });
+  const csv = toCsv([sample(ex('1.2')), sample({ id: 2, ...ex('1.5') })], 2);
+  assert.ok(csv.includes('"測定:MFR (g/10min)"'));
+  assert.ok(!csv.includes('［単位］'));
 });
