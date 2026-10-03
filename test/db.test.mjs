@@ -4,6 +4,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { compositionSig } from '../public/calc.mjs';
+import { buildMatrix } from '../public/matrix.mjs';
 
 process.env.MB_DB = ':memory:';
 const store = await import('../db.mjs');
@@ -216,4 +217,127 @@ test('配合: 使用停止のベース樹脂は新しく使えない。元から
   const other = setup();
   const r2 = store.getRecipe(other.recipe.id);
   assert.throws(() => store.saveRecipe({ ...r2, base_material_id: resin.id, changed_by: 'A' }, r2.id), e => e.status === 400);
+});
+
+test('実秤量: 入力した文字列の小数の桁数を残す（250.0 を 250 にしない）。送り直しても変わらない', () => {
+  const { mb, sample } = setup();
+  const s = sample({ actuals: [{ material_id: mb.id, row_type: 'additive', actual_g: '41.0', lot: '' }] });
+  const add = s.weighings.find(w => w.row_type === 'additive');
+  assert.equal(add.actual_g, 41);
+  assert.equal(add.actual_dp, 1);
+  const again = store.saveSample({ ...asInput(s), changed_by: '確認者' }, s.id);
+  assert.equal(again.weighings.find(w => w.row_type === 'additive').actual_dp, 1);
+  assert.match(store.compareCsv([s.id]).csv, /"41\.0"/);
+});
+
+test('原料の CAS 番号: 誤りは登録できない。使われている原料では、入れた後は変えられない（空欄への記入はできる）', () => {
+  assert.throws(() => store.createMaterial({ name: uniq('AO'), kind: 'additive', active_pct: 100, cas_no: '6683-19-7' }),
+    e => e.status === 400);
+  const { mb, sample } = setup();
+  sample();
+  const filled = store.updateMaterial(mb.id, { ...mb, cas_no: '６６８３－１９－８', grade: 'AO-50' });
+  assert.equal(filled.cas_no, '6683-19-8');
+  assert.throws(() => store.updateMaterial(mb.id, { ...filled, cas_no: '1592-23-0' }), e => e.status === 409);
+  assert.throws(() => store.updateMaterial(mb.id, { ...filled, grade: 'AO-60' }), e => e.status === 409);
+  assert.equal(store.updateMaterial(mb.id, { ...filled, memo: 'メモだけ' }).memo, 'メモだけ');
+});
+
+test('測定値の範囲で絞り込む: 両端を含み、数値として読めない値は対象外。一覧に測定値の列を出す', () => {
+  const { recipe, sample } = setup();
+  const label = uniq('MFR');
+  const meas = value => ({ extras: [{ category: 'measurement', label, value, unit: 'g/10min' }] });
+  const a = sample(meas('9.8'));
+  const b = sample(meas('10'));
+  sample(meas('n.d.'));
+  const codes = f => store.listSamples({ recipe: String(recipe.id), mlabel: label, ...f }).map(s => s.code).sort();
+  assert.deepEqual(codes({ mmin: '10' }), [b.code]);
+  assert.deepEqual(codes({ mmax: '10' }), [a.code, b.code].sort());
+  assert.deepEqual(codes({ mmin: '0', mmax: '0' }), []);   // n.d. を 0 として拾わない
+  assert.throws(() => store.listSamples({ mmin: '1' }), e => e.status === 400);
+  assert.throws(() => store.listSamples({ mlabel: label, mmin: 'abc' }), e => e.status === 400);
+  const row = store.listSamples({ recipe: String(recipe.id) }).find(s => s.id === a.id);
+  assert.equal(row.measurements, `${label} 9.8 g/10min`);
+});
+
+test('前回のロット: 原料ごとに、作成日の新しいサンプルの空欄でないロット', () => {
+  const { mb, resin, sample } = setup();
+  sample({ made_on: '2026-09-01', actuals: [{ material_id: mb.id, row_type: 'additive', actual_g: 40, lot: 'OLD' }] });
+  const newer = sample({ made_on: '2026-09-20', actuals: [{ material_id: mb.id, row_type: 'additive', actual_g: 40, lot: 'NEW' }] });
+  sample({ made_on: '2026-09-30', actuals: [{ material_id: mb.id, row_type: 'additive', actual_g: 40, lot: '' }] });
+  const lots = store.lastLots(`${mb.id},${resin.id}`).map(l => ({ ...l }));
+  assert.deepEqual(lots, [{ material_id: mb.id, lot: 'NEW', code: newer.code, made_on: '2026-09-20' }]);
+});
+
+test('自由項目の単位の候補: 項目名ごとに、使われた単位を多い順に返す', () => {
+  const { sample } = setup();
+  const label = uniq('粘度');
+  const ex = unit => ({ extras: [{ category: 'measurement', label, value: '1', unit }] });
+  sample(ex('Pa·s'));
+  sample(ex('mPa·s'));
+  sample(ex('mPa·s'));
+  const l = store.listExtraLabels().find(x => x.label === label);
+  assert.deepEqual(l.units, ['mPa·s', 'Pa·s']);
+  assert.equal(l.unit, 'mPa·s');
+});
+
+test('実秤量の桁数: 数値で送り直した行は actual_dp をそのまま残し、無い・値と合わないときは推測せず不明にする', () => {
+  const { mb, sample } = setup();
+  const s = sample();   // 数値の 41 で保存（桁数の情報なし）
+  assert.equal(s.weighings.find(w => w.row_type === 'additive').actual_dp, null);
+  const keep = store.saveSample({ ...asInput(s), memo: 'メモだけ直す', changed_by: '確認者' }, s.id);
+  assert.equal(keep.weighings.find(w => w.row_type === 'additive').actual_dp, null);   // 「整数まで読んだ」にしない
+  const bad = store.saveSample({ ...asInput(keep), changed_by: '確認者',
+    actuals: [{ material_id: mb.id, row_type: 'additive', actual_g: 40.55, actual_dp: 1 }] }, s.id);
+  assert.equal(bad.weighings.find(w => w.row_type === 'additive').actual_dp, null);   // 40.55 を 40.6 と出さない
+  const blank = store.saveSample({ ...asInput(bad), changed_by: '確認者',
+    actuals: [{ material_id: mb.id, row_type: 'additive', actual_g: ' ' }] }, s.id);
+  assert.equal(blank.weighings.find(w => w.row_type === 'additive').actual_g, null);   // 空白は 0 g にしない
+});
+
+test('比較表: 実秤量の「250」と「250.0」は同じ量として差にしない（変更履歴の差分では差にする）', () => {
+  const { mb, sample } = setup();
+  const a = sample({ actuals: [{ material_id: mb.id, row_type: 'additive', actual_g: '41', lot: '' }] });
+  const b = sample({ actuals: [{ material_id: mb.id, row_type: 'additive', actual_g: '41.0', lot: '' }] });
+  const key = `add:${mb.id}:actual`;
+  assert.equal(buildMatrix([a, b], 2).find(r => r.key === key).diff, false);
+  assert.equal(buildMatrix([a, b], 2, { allDiff: true }).find(r => r.key === key).diff, true);
+});
+
+test('測定値の範囲の絞り込み: 全角の数字も読む。16進などは数値として扱わない', () => {
+  const { recipe, sample } = setup();
+  const label = uniq('灰分');
+  const meas = value => ({ extras: [{ category: 'measurement', label, value, unit: '%' }] });
+  const zen = sample(meas('１２．３'));
+  sample(meas('0x10'));
+  const codes = store.listSamples({ recipe: String(recipe.id), mlabel: label, mmin: '10' }).map(s => s.code);
+  assert.deepEqual(codes, [zen.code]);
+});
+
+test('前回のロット: 作成日より後のサンプルのロットは入れない', () => {
+  const { mb, sample } = setup();
+  const old = sample({ made_on: '2026-08-01', actuals: [{ material_id: mb.id, row_type: 'additive', actual_g: 40, lot: 'AUG' }] });
+  sample({ made_on: '2026-09-01', actuals: [{ material_id: mb.id, row_type: 'additive', actual_g: 40, lot: 'SEP' }] });
+  assert.equal(store.lastLots(String(mb.id), '2026-08-15')[0].lot, 'AUG');
+  assert.equal(store.lastLots(String(mb.id), '2026-08-15')[0].code, old.code);
+  assert.equal(store.lastLots(String(mb.id))[0].lot, 'SEP');
+  assert.throws(() => store.lastLots(String(mb.id), '8/15'), e => e.status === 400);
+});
+
+test('自由項目の単位: 空欄（単位なし）も数える', () => {
+  const { sample } = setup();
+  const label = uniq('pH');
+  sample({ extras: [{ category: 'measurement', label, value: '7', unit: '' }] });
+  sample({ extras: [{ category: 'measurement', label, value: '7', unit: '' }] });
+  sample({ extras: [{ category: 'measurement', label, value: '7', unit: '-' }] });
+  const l = store.listExtraLabels().find(x => x.label === label);
+  assert.deepEqual(l.units, ['', '-']);
+  assert.equal(l.unit, '');
+});
+
+test('原料: CAS 番号・グレードを送らない古い画面から保存しても、登録済みの値を消さない', () => {
+  const m = store.createMaterial({ name: uniq('AO'), kind: 'additive', active_pct: 100, cas_no: '6683-19-8', grade: 'G1' });
+  const { cas_no, grade, ...old } = m;
+  const saved = store.updateMaterial(m.id, { ...old, memo: '古い画面' });
+  assert.equal(saved.cas_no, '6683-19-8');
+  assert.equal(saved.grade, 'G1');
 });

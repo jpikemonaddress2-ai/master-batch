@@ -1,10 +1,12 @@
 // 画面3: サンプル一覧
 import { JUDGEMENTS } from './fields.mjs';
 import { $, esc, api, state, showTab, toast, alertBox, downloadCsv, whileBusy } from './common.js';
-import { openSample, showSampleDiff } from './sample.js';
+import { openSample, showSampleDiff, unitList } from './sample.js';
 import { drawCompare } from './compare.js';
 
-const FILTERS = { fRecipe: 'recipe', fFrom: 'from', fTo: 'to', fJudge: 'judgement', fText: 'q' };
+const FILTERS = {
+  fRecipe: 'recipe', fFrom: 'from', fTo: 'to', fJudge: 'judgement', fText: 'q', fMLabel: 'mlabel', fMMin: 'mmin', fMMax: 'mmax',
+};
 
 let rows = [];
 let total = 0;
@@ -18,6 +20,8 @@ function query() {
     const v = $(`#${id}`).value.trim();
     if (v) p.set(key, v);
   }
+  // 項目名の無い範囲は送らない（絞り込まずに一覧を出し、入力の不足は drawMeasureWarn で知らせる）
+  if (!p.has('mlabel')) { p.delete('mmin'); p.delete('mmax'); }
   return p.toString();
 }
 
@@ -26,6 +30,7 @@ async function refresh() {
   $('#fRangeWarn').hidden = !(from && to && from > to);
   const q = query();
   const my = ++seq;
+  drawMeasureWarn(my);
   $('#lAlert').innerHTML = '';   // 前の CSV のエラーは、条件を変えたら消す
   $('#lRows').setAttribute('aria-busy', 'true');
   $('#lCount').textContent = '読み込み中…';
@@ -34,7 +39,7 @@ async function refresh() {
     [result, count] = await Promise.all([api('GET', `/api/samples?${q}`), api('GET', '/api/samples/count')]);
   } catch (e) {
     if (my !== seq) return;
-    $('#lRows').innerHTML = `<tr><td colspan="10" class="alert">${esc(e.message)}</td></tr>`;
+    $('#lRows').innerHTML = `<tr><td colspan="11" class="alert">${esc(e.message)}</td></tr>`;
     $('#lCount').textContent = '';
     return;
   } finally {
@@ -45,6 +50,39 @@ async function refresh() {
   total = count.count;
   shownQuery = q;
   draw();
+}
+
+// 自由項目の項目名と単位（測定値の絞り込みの注意に使う）。サンプルが保存・削除されたら取り直す
+let labelsCache = null;
+
+/**
+ * 測定値の絞り込みの注意。数値として読めない下限・上限、下限 > 上限、範囲だけで項目名が空のとき、
+ * その項目に単位が複数あるとき（単位は区別せずに絞り込むため）、記録の無い項目名のとき
+ */
+async function drawMeasureWarn(my) {
+  const label = $('#fMLabel').value.trim();
+  const min = $('#fMMin'), max = $('#fMMax');
+  const ranged = min.value.trim() || max.value.trim();
+  let msg = '';
+  if (min.validity.badInput || max.validity.badInput) {
+    msg = '測定値の下限・上限に数値として読めない値があります（その条件は使っていません）';
+  } else if (min.value !== '' && max.value !== '' && Number(min.value) > Number(max.value)) {
+    msg = '測定値の下限が上限より大きくなっています';
+  } else if (!label) {
+    msg = ranged ? '測定値の範囲で絞り込むときは、項目名を入力してください' : '';
+  } else {
+    try {
+      labelsCache ??= await api('GET', '/api/extra-labels');
+    } catch {
+      labelsCache = null;
+    }
+    if (my !== seq) return;
+    const known = labelsCache?.find(l => l.category === 'measurement' && l.label === label);
+    if (labelsCache && !known) msg = `測定値「${label}」の記録はありません（項目名は完全一致）`;
+    else if (known?.units.length > 1) msg = `「${label}」は単位が複数あります（${unitList(known.units)}）。単位を区別せずに絞り込みます`;
+  }
+  $('#fMWarn').textContent = msg;
+  $('#fMWarn').hidden = !msg;
 }
 
 // 件数と「全選択」・比較ボタンだけを更新する（表を描き直すとチェック中のフォーカスが失われるため）
@@ -68,9 +106,10 @@ function draw() {
       <td class="num">${s.die_temp_c ?? ''}</td>
       <td class="num">${s.torque_pct ?? ''}</td>
       <td>${s.judgement ? `<span class="tag ${s.judgement}">${JUDGEMENTS[s.judgement]}</span>` : ''}</td>
+      <td class="meas" title="${esc(s.measurements ?? '')}">${esc(s.measurements ?? '')}</td>
       <td style="color:var(--muted)">${esc(s.appearance_note ?? '')}</td>
     </tr>`).join('')
-    : `<tr><td colspan="10" class="empty">条件に一致するサンプルがありません</td></tr>`;
+    : `<tr><td colspan="11" class="empty">条件に一致するサンプルがありません</td></tr>`;
 
   $('#lRows').querySelectorAll('input[data-c]').forEach(el => el.onchange = () => {
     const id = Number(el.dataset.c);
@@ -104,10 +143,12 @@ for (const id of Object.keys(FILTERS)) {
     timer = setTimeout(refresh, 200);
   });
 }
-$('#fText').addEventListener('compositionend', () => {
-  clearTimeout(timer);
-  timer = setTimeout(refresh, 200);
-});
+for (const id of ['fText', 'fMLabel']) {
+  $(`#${id}`).addEventListener('compositionend', () => {
+    clearTimeout(timer);
+    timer = setTimeout(refresh, 200);
+  });
+}
 
 $('#csv').onclick = () => whileBusy($('#csv'), 'CSV を作成中…', async () => {
   $('#lAlert').innerHTML = '';
@@ -167,7 +208,10 @@ $('#delClose').onclick = () => $('#delDlg').close();
 document.addEventListener('masters-changed', drawRecipeFilter);
 
 // サンプルの保存・削除のあとに一覧を取り直す
-document.addEventListener('samples-changed', refresh);
+document.addEventListener('samples-changed', () => {
+  labelsCache = null;
+  refresh();
+});
 
 export async function initListTab() {
   drawRecipeFilter();

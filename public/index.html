@@ -124,6 +124,7 @@
             <tbody id="sWeigh"></tbody>
           </table>
         </div>
+        <div class="lot-bar" id="sLastLotsBar"><button class="link" id="sLastLots">前回のロットを入れる（空欄の行だけ）</button> <span class="hint" id="sLotNote" aria-live="polite"></span></div>
         <div class="summary" id="sSummary"></div>
         <div id="sWeighAlert" aria-live="polite"></div>
 
@@ -140,6 +141,7 @@
             <tbody id="sExtras-condition"></tbody>
           </table>
         </div>
+        <div id="sUnitWarn-condition" aria-live="polite"></div>
         <div style="margin-top:8px"><button class="link" id="addCond">＋ 項目を追加</button></div>
 
         <div class="sub-h">評価</div>
@@ -161,6 +163,7 @@
             <tbody id="sExtras-measurement"></tbody>
           </table>
         </div>
+        <div id="sUnitWarn-measurement" aria-live="polite"></div>
         <div style="margin-top:8px"><button class="link" id="addMeas">＋ 項目を追加</button></div>
 
         <div class="field" style="margin-top:14px; max-width:720px">
@@ -198,8 +201,12 @@
         <option value="ng">不可</option><option value="none">未評価</option>
       </select></div>
       <div class="field"><label for="fText">フリーテキスト</label><input class="w-lg" id="fText" placeholder="番号・所見・メモ・記入者・自由項目"></div>
+      <div class="field"><label for="fMLabel">測定値</label><input class="w-md" id="fMLabel" list="dl-measurement" placeholder="項目名（例: MFR）"></div>
+      <div class="field"><label for="fMMin">下限</label><input type="number" step="any" class="w-sm" id="fMMin" aria-label="測定値の下限"></div>
+      <div class="field"><label for="fMMax">上限</label><input type="number" step="any" class="w-sm" id="fMMax" aria-label="測定値の上限"></div>
       <button class="btn" id="fClear">条件クリア</button>
       <span class="warn" id="fRangeWarn" hidden>作成日の From が To より後になっています</span>
+      <span class="warn" id="fMWarn" hidden aria-live="polite"></span>
     </div>
     <div class="bar">
       <span class="count" id="lCount" aria-live="polite"></span>
@@ -215,7 +222,7 @@
           <th style="width:34px"><input type="checkbox" id="chkAll" aria-label="表示中をすべて選択"></th>
           <th>サンプル番号</th><th>作成日</th><th>配合</th>
           <th class="num">作成量 g</th><th class="num">回転数 rpm</th><th class="num">ダイ温度 ℃</th>
-          <th class="num">トルク %</th><th>判定</th><th>外観・所見</th>
+          <th class="num">トルク %</th><th>判定</th><th>測定値</th><th>外観・所見</th>
         </tr></thead>
         <tbody id="lRows"></tbody>
       </table>
@@ -243,7 +250,7 @@
   <form method="dialog" id="matForm">
     <h2 id="mTitle">原料マスタに登録</h2>
     <div class="body">
-      <div class="note" id="mUsedNote" hidden style="margin-top:0">配合やサンプルで使われているため、名前・種別・有効成分 % は変更できません。間違っている場合は「使用停止」にして、正しい内容で新しく登録してください。</div>
+      <div class="note" id="mUsedNote" hidden style="margin-top:0">配合やサンプルで使われているため、名前・種別・有効成分 % と、登録済みのグレード・CAS 番号は変更できません。間違っている場合は「使用停止」にして、正しい内容で新しく登録してください。</div>
       <div class="field"><label for="mName">原料名 <span class="req" aria-hidden="true">*</span></label><input id="mName" required placeholder="例: 酸化防止剤MB AO-50MB"></div>
       <div class="field"><label for="mKind">種別</label>
         <select id="mKind"><option value="additive">添加剤</option><option value="resin">樹脂（ベース樹脂）</option></select>
@@ -251,6 +258,8 @@
       <div class="field"><label for="mActive">有効成分 wt% <span class="req" aria-hidden="true">*</span>（純品なら 100、50% MB なら 50）</label>
         <input type="number" id="mActive" step="any" min="0" max="100" required placeholder="必須">
       </div>
+      <div class="field"><label for="mGrade">グレード</label><input id="mGrade" placeholder="例: J-700GP"></div>
+      <div class="field"><label for="mCas">CAS 番号（既製 MB は有効成分の番号。有効成分が複数なら空欄にしてメモへ）</label><input id="mCas" placeholder="例: 6683-19-8"></div>
       <div class="field"><label for="mSupplier">メーカー・購入先</label><input id="mSupplier"></div>
       <div class="field"><label for="mCaution">取扱注意（秤量表に表示されます）</label><input id="mCaution" placeholder="例: 吸湿性あり／粉じん注意／分解温度 230℃"></div>
       <div class="field"><label for="mMemo">メモ</label><input id="mMemo"></div>
@@ -269,7 +278,7 @@
   <div class="body">
     <div class="wrapper">
       <table>
-        <thead><tr><th>原料名</th><th>種別</th><th class="num">有効成分 wt%</th><th>メーカー</th><th>取扱注意</th><th class="num">使用数</th><th></th></tr></thead>
+        <thead><tr><th>原料名</th><th>種別</th><th class="num">有効成分 wt%</th><th>グレード</th><th>CAS 番号</th><th>メーカー</th><th>取扱注意</th><th class="num">使用数</th><th></th></tr></thead>
         <tbody id="matRows"></tbody>
       </table>
     </div>

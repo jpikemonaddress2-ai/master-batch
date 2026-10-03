@@ -1,7 +1,7 @@
 // サンプルを「項目 × サンプル」の表に展開する。比較表・変更履歴の差分（画面）と CSV（サーバー）で共用する。
 import { calcActual } from './calc.mjs';
 import { COND_FIELDS, JUDGEMENTS } from './fields.mjs';
-import { fmtG, fmtRaw } from './format.mjs';
+import { fmtG, fmtRaw, fmtActual } from './format.mjs';
 
 // 表に出すグループの順番。csv はCSVの見出しに付ける接頭辞（自由項目の名前の衝突よけ）
 export const GROUPS = [
@@ -29,6 +29,7 @@ const s2 = v => (v === null || v === undefined) ? '' : String(v);
  * @returns {{group:string, key:string, label:string, unit:string, value:string, noDiff?:boolean, stamp?:boolean, pair?:string, live?:boolean}[]}
  *   noDiff: 値が違って当然の項目（サンプル番号など）。比較表では差分扱いしない（変更履歴の差分では扱う）
  *   stamp: 記録日時。保存のたびに変わるので、変更履歴の差分でも扱わない
+ *   cmp: 比較表の差の判定に使う値（実秤量は「250」と「250.0」を同じ量として扱う。変更履歴の差分では表示の値で比べる）
  *   pair: 組で1つの値になる行の組の名前（buildMatrix で差を連動させる）。名前は組の代表の行の key にする
  *   live: サンプルの記録ではなく、表示のたびに配合から引く値（配合名）。
  *         配合の名前を変えるとサンプルの履歴の差分に紛れ込むので、変更履歴の差分では扱わない
@@ -56,7 +57,7 @@ export function sampleEntries(s, zones, { csv = false } = {}) {
       add('weigh', 'base', 'ベース樹脂', '', w.material_name);
       add('weigh', 'base:lot', 'ベース樹脂 ロット', '', w.lot);
       add('weigh', 'base:target', 'ベース樹脂 狙い量', 'g', fmtG(w.target_g));
-      add('weigh', 'base:actual', 'ベース樹脂 実秤量', 'g', fmtRaw(w.actual_g));
+      add('weigh', 'base:actual', 'ベース樹脂 実秤量', 'g', fmtActual(w.actual_g, w.actual_dp), { cmp: fmtRaw(w.actual_g) });
       continue;
     }
     const k = `add:${w.material_id}`;
@@ -65,7 +66,7 @@ export function sampleEntries(s, zones, { csv = false } = {}) {
     add('weigh', `${k}:active`, `${n} 有効成分`, 'wt%', fmtRaw(w.active_pct_snapshot));
     add('weigh', `${k}:lot`, `${n} ロット`, '', w.lot);
     add('weigh', `${k}:target_g`, `${n} 狙い量`, 'g', fmtG(w.target_g));
-    add('weigh', `${k}:actual`, `${n} 実秤量`, 'g', fmtRaw(w.actual_g));
+    add('weigh', `${k}:actual`, `${n} 実秤量`, 'g', fmtActual(w.actual_g, w.actual_dp), { cmp: fmtRaw(w.actual_g) });
     add('weigh', `${k}:real`, `${n} 実濃度`, 'wt%', real(w), csv ? { pair: `${k}:real` } : {});
     if (csv) add('weigh', `${k}:real_kind`, `${n} 実濃度の区分`, '', realNum(w) === '' ? '' : w.estimated ? '推定' : '実測', { pair: `${k}:real` });
   }
@@ -136,7 +137,7 @@ export function buildMatrix(samples, zones, { allDiff = false, csv = false } = {
       const units = new Set(unitOf.filter((u, i) => vals[i] !== ''));
       // 差は値と単位を別々に比べる（「10 Pa·s」を値に書いたサンプルと、値 10・単位 Pa·s のサンプルも差にする）。
       // 画面と CSV で同じ判定にして、「差のある行だけ」に出る行をそろえる
-      const valDiff = counts && differs(vals);
+      const valDiff = counts && differs(allDiff ? vals : es.map((e, i) => e?.cmp ?? vals[i]));
       const unitDiff = counts && differs(unitOf);
       if (units.size > 1 && csv) {
         // CSV では値に単位を付けると表計算で数値にならないので、値と単位を別の行に分ける。

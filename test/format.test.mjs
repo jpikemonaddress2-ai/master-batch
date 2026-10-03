@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { fmtG, fmtRaw, fmtDelta } from '../public/format.mjs';
+import { fmtG, fmtRaw, fmtDelta, decimalsOf, fmtActual } from '../public/format.mjs';
+import { casError, normCas } from '../public/fields.mjs';
 import { calcActual, weighOutliers, compositionSig } from '../public/calc.mjs';
 
 test('質量: 少量の添加剤が 0.0 にならない', () => {
@@ -42,4 +43,32 @@ test('実秤量の桁違いを見つける', () => {
 test('組成の比較: 並び順・数値の型の違いは同じ組成とみなす', () => {
   assert.equal(compositionSig(1, [{ material_id: 3, target_active_pct: 2 }, { material_id: 2, target_active_pct: '0.5' }]),
     compositionSig('1', [{ material_id: '2', target_active_pct: 0.5 }, { material_id: 3, target_active_pct: 2.0 }]));
+});
+
+test('decimalsOf: 入力した小数の桁数（末尾の 0 も数える）。指数表記などは null', () => {
+  assert.equal(decimalsOf('250.0'), 1);
+  assert.equal(decimalsOf('250'), 0);
+  assert.equal(decimalsOf('0.400'), 3);
+  assert.equal(decimalsOf(' 12. '), 0);
+  assert.equal(decimalsOf('2.5e2'), null);
+  assert.equal(decimalsOf('1.' + '0'.repeat(20)), null);   // MAX_DP より細かい桁は不明
+  assert.equal(decimalsOf('.'), null);
+  assert.equal(decimalsOf(''), null);
+  assert.equal(decimalsOf('.5'), 1);
+});
+
+test('fmtActual: 入力した桁数で出す。桁数が無い古い記録は丸めずに出す', () => {
+  assert.equal(fmtActual(250, 1), '250.0');
+  assert.equal(fmtActual(0.4, 3), '0.400');
+  assert.equal(fmtActual(250.4, null), '250.4');
+  assert.equal(fmtActual(null, 1), '');
+});
+
+test('CAS 番号: 形とチェックディジットを確かめる。全角やダッシュはそろえる', () => {
+  assert.equal(casError('6683-19-8'), null);      // Irganox 1010
+  assert.equal(casError('1592-23-0'), null);      // ステアリン酸カルシウム
+  assert.match(casError('6683-19-7'), /チェックディジット/);
+  assert.match(casError('668319-8'), /形/);
+  assert.equal(normCas(' ６６８３－１９－８ '), '6683-19-8');
+  assert.equal(normCas('6683‐19‐8'), '6683-19-8');
 });

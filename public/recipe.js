@@ -332,9 +332,14 @@ function openMaterialDialog(m = null) {
     $('#mSupplier').value = m.supplier ?? '';
     $('#mMemo').value = m.memo ?? '';
     $('#mCaution').value = m.caution ?? '';
+    $('#mGrade').value = m.grade ?? '';
+    $('#mCas').value = m.cas_no ?? '';
     $('#mArchived').checked = !!m.archived;
   }
   for (const id of ['#mName', '#mKind', '#mActive']) $(id).disabled = usedLock;
+  // グレード・CAS 番号は、使われている原料でも空欄なら後から入れられる（入っていれば変えられない）
+  $('#mGrade').disabled = usedLock && !!m.grade;
+  $('#mCas').disabled = usedLock && !!m.cas_no;
   $('#mUsedNote').hidden = !usedLock;
   $('#matDlg').showModal();
   (usedLock ? $('#mSupplier') : $('#mName')).focus();
@@ -361,6 +366,7 @@ $('#matForm').onsubmit = async e => {
   const body = {
     name: $('#mName').value, kind: $('#mKind').value, active_pct: $('#mActive').value,
     supplier: $('#mSupplier').value, memo: $('#mMemo').value, caution: $('#mCaution').value,
+    grade: $('#mGrade').value, cas_no: $('#mCas').value,
     archived: $('#mArchived').checked,
   };
   try {
@@ -386,12 +392,14 @@ function drawMaterialList() {
       <td>${esc(m.name)}${m.archived ? ' <span class="tag">使用停止</span>' : ''}</td>
       <td>${kinds[m.kind]}</td>
       <td class="num">${fmtVal(m.active_pct)}</td>
+      <td>${esc(m.grade ?? '')}</td>
+      <td>${esc(m.cas_no ?? '')}</td>
       <td>${esc(m.supplier ?? '')}</td>
       <td>${m.caution ? `<span class="caution">⚠ ${esc(m.caution)}</span>` : ''}</td>
       <td class="num">${m.used_count}</td>
       <td><button type="button" class="link" data-mid="${m.id}" aria-label="${esc(m.name)} を編集">編集</button></td>
     </tr>`).join('')
-    : '<tr><td colspan="7" class="empty">原料はまだありません。</td></tr>';
+    : '<tr><td colspan="9" class="empty">原料はまだありません。</td></tr>';
   $('#matRows').querySelectorAll('button[data-mid]').forEach(b => b.onclick = () =>
     openMaterialDialog(matById(Number(b.dataset.mid))));
 }

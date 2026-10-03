@@ -65,7 +65,7 @@ function guard(req, url) {
 
 // headers: 追加の応答ヘッダ（例: 比較の CSV で、削除されていて出せなかった件数）
 class Csv { constructor(body, filename, headers = {}) { this.body = body; this.filename = filename; this.headers = headers; } }
-const filters = q => Object.fromEntries(['recipe', 'from', 'to', 'judgement', 'q'].map(k => [k, q.get(k) || null]));
+const filters = q => Object.fromEntries(['recipe', 'from', 'to', 'judgement', 'q', 'mlabel', 'mmin', 'mmax'].map(k => [k, q.get(k) || null]));
 const stamp = () => new Date().toLocaleDateString('sv-SE').replaceAll('-', '');
 
 const MAX_COMPARE = 200;   // 比較の CSV に出せる件数。画面側（compare.js）も同じ数でボタンを止める
@@ -103,6 +103,7 @@ const routes = [
   ['GET', /^\/api\/samples\/(\d+)\/history$/, (req, [id]) => store.listHistory(Number(id))],
   ['GET', /^\/api\/deleted-samples$/, () => store.listDeletedSamples()],
   ['GET', /^\/api\/extra-labels$/, () => store.listExtraLabels()],
+  ['GET', /^\/api\/last-lots$/, (req, p, q) => store.lastLots(q.get('materials'), q.get('until'))],
 ];
 
 async function handleApi(req, res, url) {

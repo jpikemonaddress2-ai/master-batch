@@ -3,7 +3,7 @@ import {
   targetWeighings, calcActual, weighOutliers, compositionSig, compositionChanges, basisFromWeighings, archivedMessage, WEIGH_TOLERANCE,
 } from './calc.mjs';
 import { COND_FIELDS, JUDGEMENTS } from './fields.mjs';
-import { fmtDelta } from './format.mjs';
+import { fmtDelta, fmtActual } from './format.mjs';
 import { buildMatrix } from './matrix.mjs';
 import {
   $, esc, fmt, fmtGram, fmtVal, toNum, alertBox, api, toast, state, matById, recipeById, reloadMasters,
@@ -52,7 +52,11 @@ function blankDraft(recipe) {
     barrel_temps: Array(zones()).fill(null), die_temp_c: null,
     ...Object.fromEntries(COND_FIELDS.map(f => [f.key, null])),
     judgement: null, appearance_note: '', memo: '',
-    extras: [], actuals: {}, lots: {}, basis: basisFromRecipe(recipe),
+    // actuals: 実秤量（計算用の数値）
+    // actualText: この画面で入力した行の文字列（「250.0」の桁数を残して保存する）。入力していない行は持たない
+    // actualDp: 保存済みの行の小数の桁数（入力していない行はこの値のまま送り直す。不明なら null のまま）
+    // lotAuto: 「前回のロットを入れる」で入れたロットの行（自分で直したら外す）
+    extras: [], actuals: {}, actualText: {}, actualDp: {}, lots: {}, lotAuto: new Set(), basis: basisFromRecipe(recipe),
     source_id: null, source_code: null,   // 引用元のサンプル（画面表示用）
     changed: new Set(),                   // 他の人の配合変更で狙い量が変わった行（強調表示用）
   };
@@ -69,6 +73,9 @@ function fromSample(s) {
     judgement: s.judgement, appearance_note: s.appearance_note ?? '', memo: s.memo ?? '',
     extras: s.extras.map(e => ({ ...e })),
     actuals: Object.fromEntries(s.weighings.map(w => [rowKey(w), w.actual_g])),
+    actualText: {},
+    actualDp: Object.fromEntries(s.weighings.map(w => [rowKey(w), w.actual_dp ?? null])),
+    lotAuto: new Set(),
     lots: Object.fromEntries(s.weighings.map(w => [rowKey(w), w.lot ?? ''])),
     created_at: s.created_at, updated_at: s.updated_at,
     basis: basisFromWeighings(s.weighings),
@@ -165,6 +172,9 @@ function drawForm() {
   $('#sDelete').hidden = isNew;
   $('#sCopy').hidden = isNew;
   $('#sCsv').hidden = isNew;
+  // 保存済みのサンプルでは、後から作ったサンプルのロットが入ってしまうので出さない
+  $('#sLastLotsBar').hidden = !isNew;
+  $('#sLotNote').textContent = '';
   // 記入者は作成時に確定する。既存サンプルを直す人は「変更者」として毎回名前を残す
   $('#sBy').disabled = !isNew;
   $('#sEditorField').hidden = isNew;
@@ -250,8 +260,10 @@ function drawWeigh() {
     const name = r.row_type === 'base' ? (mat?.name ?? '（不明な原料）') : draft.basis.items[i].name;
     const key = rowKey(r);
     const caution = mat?.caution ? `<div class="caution">⚠ ${esc(mat.caution)}</div>` : '';
-    const lot = `<input style="width:100%" data-lot="${key}" value="${esc(draft.lots[key] ?? '')}" aria-label="${esc(name)} のロット">`;
-    const actual = `<input type="number" step="any" min="0" style="width:100%" data-key="${key}" value="${r.actual_g ?? ''}" aria-label="${esc(name)} の実秤量 g">`;
+    const auto = draft.lotAuto.has(key);
+    const lot = `<input style="width:100%" data-lot="${key}" value="${esc(draft.lots[key] ?? '')}" aria-label="${esc(name)} のロット${auto ? '（前回のロットを入れました）' : ''}"${
+      auto ? ' class="lot-auto" title="前回のロットを入れました。袋が替わっていないか確認してください"' : ''}>`;
+    const actual = `<input type="number" step="any" min="0" style="width:100%" data-key="${key}" value="${esc(draft.actualText[key] ?? fmtActual(r.actual_g, draft.actualDp[key]))}" aria-label="${esc(name)} の実秤量 g">`;
     const cls = draft.changed.has(key) ? 'class="changed"' : '';
     if (r.row_type === 'base') {
       return `<tr ${cls}>
@@ -268,10 +280,14 @@ function drawWeigh() {
   }).join('');
   $('#sWeigh').querySelectorAll('input[data-key]').forEach(el => el.oninput = () => {
     draft.actuals[el.dataset.key] = toNum(el.value);
+    draft.actualText[el.dataset.key] = el.value;
     dirty.set(true); calcSample();
   });
   $('#sWeigh').querySelectorAll('input[data-lot]').forEach(el => el.oninput = () => {
     draft.lots[el.dataset.lot] = el.value;
+    draft.lotAuto.delete(el.dataset.lot);
+    el.classList.remove('lot-auto');
+    el.removeAttribute('title');
     dirty.set(true);
   });
   calcSample();
@@ -296,10 +312,14 @@ function calcSample() {
   });
   const qty = draft.total_qty_g || 0;
   const diff = a.total - qty;
+  // 一部の行だけ入力したときは、未入力の行を狙い量で補った推定の総量（実濃度の「推定」と同じ扱い）
+  const partial = a.entered && rows.some(r => !Number.isFinite(r.actual_g));
+  const est = partial ? '<small class="est" title="実秤量が未入力の行を狙い量で補った推定値">推定</small>' : '';
+  const kind = partial ? '推定' : '実測';
   $('#sSummary').innerHTML = `
     <div><div class="k">狙い総量</div><div class="v">${fmtGram(qty)}<small>g</small></div></div>
-    <div><div class="k">実測総量${a.entered ? '' : '（未入力）'}</div><div class="v">${a.entered ? fmtGram(a.total) : '—'}<small>g</small></div></div>
-    <div><div class="k">総量差（実測−狙い）</div><div class="v">${a.entered ? fmtDelta(diff, 1) : '—'}<small>g</small></div></div>`;
+    <div><div class="k">${a.entered ? `${kind}総量` : '実測総量（未入力）'}</div><div class="v">${a.entered ? fmtGram(a.total) : '—'}<small>g</small>${est}</div></div>
+    <div><div class="k">総量差（${kind}−狙い）</div><div class="v">${a.entered ? fmtDelta(diff, 1) : '—'}<small>g</small>${est}</div></div>`;
   // 新規のときだけ。保存済みのサンプルはスナップショットで計算するので、原料の使用停止は関係ない
   const r = draft.id === null ? recipeById(draft.recipe_id) : null;
   const stopped = r ? archivedInRecipe(r) : [];
@@ -315,6 +335,36 @@ function calcSample() {
 }
 
 /* ---------- 自由項目 ---------- */
+const knownLabel = (cat, label) => extraLabels.find(l => l.category === cat && l.label === label.trim());
+
+// 単位の入力候補: その項目名で使われた単位（多い順）。項目名が新しければ、同じ区分で使われた単位すべて
+function unitOptions(cat, label) {
+  const units = knownLabel(cat, label)?.units
+    ?? [...new Set(extraLabels.filter(l => l.category === cat).flatMap(l => l.units))];
+  return units.filter(Boolean).map(u => `<option value="${esc(u)}">`).join('');
+}
+
+// 単位の一覧の表示（空欄は「単位なし」と書く）
+export const unitList = units => units.map(u => u || '単位なし').join('、');
+
+/**
+ * その項目名で最も多く使われた単位と違う単位で書いた行を知らせる
+ * （g/10min と g/10分 のような表記ゆれは、比較表・CSV で別の単位として扱われる）。
+ * 一度紛れ込んだ表記も、多数派でなければ知らせ続ける。単位が本当に違う測り方なら、そのままでよい
+ */
+function drawUnitWarn(cat) {
+  const msgs = draft.extras.filter(e => e.category === cat).flatMap(e => {
+    // units は空欄（単位なし）も含めて多い順。最も多いのが「単位なし」なら、空欄はそれに合っている
+    const units = knownLabel(cat, e.label)?.units ?? [];
+    const u = e.unit.trim();
+    if (!units.length || u === units[0]) return [];
+    return [`「${e.label.trim()}」の単位${u ? `「${u}」` : 'が空欄'}は、これまで最も多い「${units[0] || '単位なし'}」と違います` +
+      (units.length > 1 ? `（これまで: ${unitList(units)}）` : '')];
+  });
+  setIfChanged($(`#sUnitWarn-${cat}`), msgs.length
+    ? `<div class="warn">${msgs.map(esc).join('<br>')}。同じ単位なら表記をそろえてください（違う表記は、比較表・CSV で別の単位として扱われます）。</div>` : '');
+}
+
 function drawExtras(cat) {
   const tbody = $(`#sExtras-${cat}`);
   const idx = draft.extras.map((e, i) => (e.category === cat ? i : -1)).filter(i => i >= 0);
@@ -323,7 +373,8 @@ function drawExtras(cat) {
     return `<tr>
       <td><input style="width:100%" data-i="${i}" data-f="label" list="dl-${cat}" value="${esc(e.label)}" aria-label="${n + 1} 行目の項目名"></td>
       <td><input style="width:100%" data-i="${i}" data-f="value" value="${esc(e.value)}" aria-label="${esc(e.label) || `${n + 1} 行目`} の値"></td>
-      <td><input style="width:100%" data-i="${i}" data-f="unit" value="${esc(e.unit)}" aria-label="${esc(e.label) || `${n + 1} 行目`} の単位"></td>
+      <td><input style="width:100%" data-i="${i}" data-f="unit" list="dlu-${i}" value="${esc(e.unit)}" aria-label="${esc(e.label) || `${n + 1} 行目`} の単位">
+        <datalist id="dlu-${i}">${unitOptions(cat, e.label)}</datalist></td>
       <td><button class="del" data-i="${i}" aria-label="${esc(e.label) || `${n + 1} 行目`} を削除">削除</button></td></tr>`;
   }).join('') : '<tr><td colspan="4" class="hint">項目はありません。</td></tr>';
 
@@ -331,15 +382,20 @@ function drawExtras(cat) {
     draft.extras[el.dataset.i][el.dataset.f] = el.value;
     dirty.set(true);
   });
-  // 既知の項目名を選んだら、単位が空なら過去の単位を入れる
+  // 単位の注意は入力を確定したときに出す（打っている途中で出たり消えたりしない）
+  tbody.querySelectorAll('input[data-f="unit"]').forEach(el => el.onchange = () => drawUnitWarn(cat));
+  // 既知の項目名を選んだら、単位の候補をその項目で使われた単位にし、単位が空なら最も多い単位を入れる
   tbody.querySelectorAll('input[data-f="label"]').forEach(el => el.onchange = () => {
     const e = draft.extras[el.dataset.i];
-    const known = extraLabels.find(l => l.category === cat && l.label === e.label.trim());
+    $(`#dlu-${el.dataset.i}`).innerHTML = unitOptions(cat, e.label);
+    const known = knownLabel(cat, e.label);
     if (known?.unit && !e.unit) {
       e.unit = known.unit;
       tbody.querySelector(`input[data-i="${el.dataset.i}"][data-f="unit"]`).value = known.unit;
     }
+    drawUnitWarn(cat);
   });
+  drawUnitWarn(cat);
   tbody.querySelectorAll('button.del').forEach(el => el.onclick = () => {
     draft.extras.splice(Number(el.dataset.i), 1);
     dirty.set(true);
@@ -361,14 +417,20 @@ function body(changedBy) {
   const { rows } = currentRows();
   return {
     ...draft,
-    basis: undefined, lots: undefined, changed: undefined,
+    basis: undefined, lots: undefined, changed: undefined, actualText: undefined, actualDp: undefined, lotAuto: undefined,
     changed_by: changedBy,
     // 画面で見ていた組成。保存までに他の人が配合を変えていたらサーバーが気づけるようにする
     recipe_sig: compositionSig(draft.basis.base_material_id, draft.basis.items),
     // 値の無い行は保存しない（引用で項目名だけ並べた測定値を、測らなかった場合など）
     extras: draft.extras.filter(e => e.value.trim()),
     actuals: rows.map(r => ({
-      material_id: r.material_id, row_type: r.row_type, actual_g: r.actual_g, lot: draft.lots[rowKey(r)] ?? '',
+      // この画面で入力した実秤量は文字列のまま送る（サーバーが小数の桁数を記録する）。
+      // 入力していない行は保存済みの数値と桁数をそのまま送る（桁数が不明な古い記録を、表示の文字列から決め直さない）
+      material_id: r.material_id, row_type: r.row_type,
+      ...(rowKey(r) in draft.actualText
+        ? { actual_g: draft.actualText[rowKey(r)] }
+        : { actual_g: r.actual_g, actual_dp: draft.actualDp[rowKey(r)] ?? null }),
+      lot: draft.lots[rowKey(r)] ?? '',
     })),
   };
 }
@@ -555,6 +617,47 @@ $('#sCsv').onclick = () => {
   });
 };
 
+/**
+ * 空欄のロットに、その原料を直近のサンプルで使ったロットを入れる。同じ袋を続けて使うことが多いので打ち直しを減らす。
+ * 引用や「続けて新規」では黙って引き継がない（袋が替わったのに前のロットが残る取り違えを防ぐ）ので、押したときだけ入れる
+ */
+$('#sLastLots').onclick = () => whileBusy($('#sLastLots'), 'ロットを読み込み中…', async () => {
+  if (!draft?.basis) return;
+  // 読んでいる間に別のサンプルを開いた・配合や作成日を変えたときは入れない（配合の変更は draft を差し替えないので組成で見る）
+  const d = draft;
+  const sig = () => `${compositionSig(draft.basis.base_material_id, draft.basis.items)}|${draft.made_on}`;
+  const before = sig();
+  const ids = [...new Set(currentRows().rows.map(r => r.material_id))];
+  $('#sLotNote').textContent = '';
+  let last;
+  try {
+    // 作成日より後のサンプルのロットは入れない（過去の日付のサンプルを後から記録するとき）
+    last = await api('GET', `/api/last-lots?materials=${ids.join(',')}&until=${encodeURIComponent(draft.made_on || '')}`);
+  } catch (e) {
+    if (draft === d) toast(`前回のロットを読めませんでした: ${e.message}`);
+    return;
+  }
+  if (draft !== d || sig() !== before) return;
+  const rows = currentRows().rows;
+  const by = new Map(last.map(l => [l.material_id, l]));
+  const filled = [];
+  for (const r of rows) {
+    const k = rowKey(r);
+    const l = by.get(r.material_id);
+    if ((draft.lots[k] ?? '').trim() || !l) continue;
+    draft.lots[k] = l.lot;
+    draft.lotAuto.add(k);
+    filled.push(`${matById(r.material_id)?.name ?? '原料'}: ${l.lot}（${l.code}, ${l.made_on}）`);
+  }
+  if (filled.length) {
+    dirty.set(true);
+    drawWeigh();
+  }
+  $('#sLotNote').textContent = filled.length
+    ? `${filled.length} 行に入れました（色の付いた欄）— ${filled.join(' ／ ')}。袋が替わっていないか確認してください`
+    : '入れられるロットはありませんでした（空欄の行の原料で、作成日までにロットを記録したサンプルがありません）';
+});
+
 $('#addCond').onclick = () => addExtra('condition');
 $('#addMeas').onclick = () => addExtra('measurement');
 
@@ -578,8 +681,9 @@ $('#sRecipe').onchange = e => {
   const r = recipeById(Number(e.target.value));
   Object.assign(draft, {
     recipe_id: r.id, total_qty_g: r.default_qty_g,
-    basis: basisFromRecipe(r), actuals: {}, lots: {}, changed: new Set(),
+    basis: basisFromRecipe(r), actuals: {}, actualText: {}, actualDp: {}, lots: {}, lotAuto: new Set(), changed: new Set(),
   });
+  $('#sLotNote').textContent = '';
   $('#sQty').value = r.default_qty_g;
   dirty.set(true);
   drawWeigh();

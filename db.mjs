@@ -5,9 +5,10 @@ import { DB_PATH, BARREL_ZONES } from './config.mjs';
 import {
   calcCharge, targetWeighings, compositionSig, basisFromWeighings, archivedNames, archivedMessage, archivedAdded, archivedAddedMessage,
 } from './public/calc.mjs';
-import { COND_FIELDS, JUDGEMENTS, MAX_ZONES, MAX_EXTRAS, MAX_ITEMS } from './public/fields.mjs';
+import { COND_FIELDS, JUDGEMENTS, MAX_ZONES, MAX_EXTRAS, MAX_ITEMS, normCas, casError } from './public/fields.mjs';
+import { decimalsOf, MAX_DP } from './public/format.mjs';
 import { toCsv, toMatrixCsv, sortForCompare } from './public/matrix.mjs';
-import { HttpError, positiveId } from './http-util.mjs';
+import { HttpError, positiveId, parseIds } from './http-util.mjs';
 
 mkdirSync(dirname(DB_PATH), { recursive: true });
 const db = new DatabaseSync(DB_PATH);
@@ -18,6 +19,14 @@ db.exec(`
   PRAGMA foreign_keys = ON;
   PRAGMA busy_timeout = 5000;
 `);
+
+// 測定値（自由項目の値は文字列）の数値での絞り込み用。数値として読めない値は NULL
+// （CAST だと「n.d.」が 0 になり、範囲の条件に引っかかってしまう）
+// 全角の数字（IME で入った「１２．３」）も読む。10進の形だけを受け付ける（Number は「0x10」も 16 と読むため）
+db.function('to_num', { deterministic: true }, v => {
+  const t = String(v ?? '').normalize('NFKC').trim();
+  return /^[+-]?(\d+\.?\d*|\.\d+)(e[+-]?\d+)?$/i.test(t) ? Number(t) : null;
+});
 
 function tx(fn) {
   db.exec('BEGIN IMMEDIATE');
@@ -191,6 +200,14 @@ CREATE TABLE recipe_history (
 );
 CREATE INDEX idx_recipe_history ON recipe_history(recipe_id);
 `,
+  // 5: 実秤量の小数の桁数（「250.0」を「250」と出さない）、原料の CAS 番号とグレード
+  `
+ALTER TABLE sample_weighings ADD COLUMN actual_dp INTEGER;
+ALTER TABLE materials ADD COLUMN cas_no TEXT;
+ALTER TABLE materials ADD COLUMN grade TEXT;
+-- 「前回のロットを入れる」と原料の使用数で、原料ごとに秤量明細を引く
+CREATE INDEX idx_weighings_material ON sample_weighings(material_id);
+`,
 ];
 
 {
@@ -280,36 +297,46 @@ function validateMaterial(input, selfId = null) {
       ? `原料「${name}」は既に登録されています`
       : `原料「${same.name}」が既に登録されています（全角/半角・大文字/小文字・空白の違いだけの名前は登録できません）`);
   }
+  const cas = normCas(str(input.cas_no));
+  const bad = cas && casError(cas);
+  if (bad) throw new HttpError(400, bad);
   return {
     name, kind, active_pct: active,
     supplier: str(input.supplier) || null, memo: str(input.memo) || null, caution: str(input.caution) || null,
+    cas_no: cas || null, grade: str(input.grade) || null,
   };
 }
 
 export function createMaterial(input) {
   const v = validateMaterial(input);
   const { lastInsertRowid } = db.prepare(
-    'INSERT INTO materials (name, kind, active_pct, supplier, memo, caution) VALUES (?, ?, ?, ?, ?, ?)'
-  ).run(v.name, v.kind, v.active_pct, v.supplier, v.memo, v.caution);
+    'INSERT INTO materials (name, kind, active_pct, supplier, memo, caution, cas_no, grade) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+  ).run(v.name, v.kind, v.active_pct, v.supplier, v.memo, v.caution, v.cas_no, v.grade);
   return getMaterial(Number(lastInsertRowid));
 }
 
 /**
  * 原料を直す。配合やサンプルで使われている原料は、名前・種別・有効成分% を変えられない
  * （変えると過去の記録の意味が変わる）。間違えて登録したなら「使用停止」にして新しく登録してもらう。
+ * CAS 番号・グレードも物質の同定なので、使われている原料では一度入れたら変えられない（空欄への後からの記入はできる）。
  * メーカー・メモ・取扱注意・使用停止はいつでも変えられる。
  */
 export function updateMaterial(id, input) {
   return tx(() => {
     const cur = getMaterial(id);
-    const v = validateMaterial(input, id);
+    // CAS 番号・グレードを送ってこない古い画面からの保存では、登録済みの値を消さない
+    const v = validateMaterial({ cas_no: cur.cas_no, grade: cur.grade, ...input }, id);
     if (cur.used_count > 0 && (v.name !== cur.name || v.kind !== cur.kind || v.active_pct !== cur.active_pct)) {
       throw new HttpError(409, 'この原料は配合やサンプルで使われているため、名前・種別・有効成分 % は変更できません。「使用停止」にして、正しい内容で新しく登録してください');
     }
+    const locked = f => cur.used_count > 0 && cur[f] && v[f] !== cur[f];
+    if (locked('cas_no') || locked('grade')) {
+      throw new HttpError(409, 'この原料は配合やサンプルで使われているため、登録済みの CAS 番号・グレードは変更できません。間違っている場合は「使用停止」にして、正しい内容で新しく登録してください');
+    }
     db.prepare(`
-      UPDATE materials SET name = ?, kind = ?, active_pct = ?, supplier = ?, memo = ?, caution = ?, archived = ?
+      UPDATE materials SET name = ?, kind = ?, active_pct = ?, supplier = ?, memo = ?, caution = ?, cas_no = ?, grade = ?, archived = ?
       WHERE id = ?
-    `).run(v.name, v.kind, v.active_pct, v.supplier, v.memo, v.caution, input.archived ? 1 : 0, id);
+    `).run(v.name, v.kind, v.active_pct, v.supplier, v.memo, v.caution, v.cas_no, v.grade, input.archived ? 1 : 0, id);
     return getMaterial(id);
   });
 }
@@ -423,8 +450,8 @@ export function listRecipeHistory(recipeId) {
 
 // 空欄は null、数値でなければエラー
 function optNum(v, label) {
-  if (v === '' || v === null || v === undefined) return null;
-  const n = Number(v);
+  if (v === null || v === undefined || str(v) === '') return null;
+  const n = Number(str(v));
   if (!Number.isFinite(n)) throw new HttpError(400, `${label}: 数値を入力してください`);
   return n;
 }
@@ -454,18 +481,32 @@ export function getSample(id) {
 
 /**
  * サンプル一覧。条件はすべて省略可。新しい作成日の順（asc: true なら古い順）。
- * @param {{recipe?:string, from?:string, to?:string, judgement?:string, q?:string}} f
+ * @param {{recipe?:string, from?:string, to?:string, judgement?:string, q?:string, mlabel?:string, mmin?:string, mmax?:string}} f
  *   judgement: 'good' | 'ok' | 'ng' | 'none'（未評価）
  *   q: サンプル番号・所見・メモ・記入者・自由項目（項目名と値）の部分一致
+ *   mlabel / mmin / mmax: 測定値の項目名（完全一致）と、その値の範囲（両端を含む）。
+ *     数値として読めない値（n.d. など）は対象外。単位は区別しない（画面で単位が複数あることを知らせる）
  * @param {{limit?:number|null, asc?:boolean}} [opts]
  */
 export function listSamples(f = {}, { limit = null, asc = false } = {}) {
+  const mlabel = str(f.mlabel) || null;
+  const bound = (v, label) => {
+    if (str(v) === '') return null;
+    const n = Number(str(v));
+    if (!Number.isFinite(n)) throw new HttpError(400, `測定値の${label}: 数値を入力してください`);
+    return n;
+  };
+  const mmin = bound(f.mmin, '下限');
+  const mmax = bound(f.mmax, '上限');
+  if (!mlabel && (mmin !== null || mmax !== null)) throw new HttpError(400, '測定値で絞り込むときは、項目名を入力してください');
   const like = f.q ? `%${f.q.replace(/[\\%_]/g, c => '\\' + c)}%` : null;
   const dir = asc ? 'ASC' : 'DESC';
   return db.prepare(`
     SELECT s.id, s.code, s.made_on, s.total_qty_g, s.screw_rpm, s.die_temp_c, s.torque_pct,
       s.judgement, s.appearance_note, s.created_by,
-      r.id AS recipe_id, r.code AS recipe_code, r.name AS recipe_name
+      r.id AS recipe_id, r.code AS recipe_code, r.name AS recipe_name,
+      (SELECT group_concat(e.label || ' ' || e.value || CASE WHEN IFNULL(e.unit, '') <> '' THEN ' ' || e.unit ELSE '' END, '；' ORDER BY e.id)
+        FROM sample_extras e WHERE e.sample_id = s.id AND e.category = 'measurement') AS measurements
     FROM samples s JOIN recipes r ON r.id = s.recipe_id
     WHERE (:recipe IS NULL OR s.recipe_id = :recipe)
       AND (:from IS NULL OR s.made_on >= :from)
@@ -475,6 +516,10 @@ export function listSamples(f = {}, { limit = null, asc = false } = {}) {
         OR s.memo LIKE :like ESCAPE '\\' OR s.created_by LIKE :like ESCAPE '\\'
         OR EXISTS (SELECT 1 FROM sample_extras e WHERE e.sample_id = s.id
           AND (e.label LIKE :like ESCAPE '\\' OR e.value LIKE :like ESCAPE '\\')))
+      AND (:mlabel IS NULL OR EXISTS (SELECT 1 FROM (
+          SELECT to_num(e.value) AS v FROM sample_extras e
+          WHERE e.sample_id = s.id AND e.category = 'measurement' AND e.label = :mlabel)
+        WHERE v IS NOT NULL AND (:mmin IS NULL OR v >= :mmin) AND (:mmax IS NULL OR v <= :mmax)))
     ORDER BY s.made_on ${dir}, s.id ${dir}
     LIMIT :limit
   `).all({
@@ -482,7 +527,7 @@ export function listSamples(f = {}, { limit = null, asc = false } = {}) {
     from: f.from || null,
     to: f.to || null,
     judgement: f.judgement || null,
-    like,
+    like, mlabel, mmin, mmax,
     limit: limit > 0 ? limit : -1,
   });
 }
@@ -509,12 +554,42 @@ export function compareCsv(ids, { onlyDiff = false } = {}) {
   });
 }
 
-// 自由項目で過去に使った項目名。入力候補に出して表記ゆれ（MFR / mfr など）を減らす
+/**
+ * 自由項目で過去に使った項目名と単位。入力候補に出して表記ゆれ（MFR / mfr、g/10min / g/10分 など）を減らす。
+ * @returns {{category:string, label:string, unit:string, units:string[], n:number}[]}
+ *   units: その項目名で使われた単位（多い順。空欄 '' も含む）。unit はその先頭（'' なら単位なしが最多）
+ */
 export function listExtraLabels() {
+  // 単位の空欄（単位なし）も1つの単位として数える（pH などで「単位なし」が多数派なら、空欄に注意を出さない）
+  const units = Map.groupBy(db.prepare(`
+    SELECT category, label, IFNULL(unit, '') AS unit, COUNT(*) AS n FROM sample_extras
+    GROUP BY category, label, IFNULL(unit, '') ORDER BY n DESC, unit
+  `).all(), u => `${u.category}\t${u.label}`);
   return db.prepare(`
-    SELECT category, label, MAX(unit) AS unit, COUNT(*) AS n
-    FROM sample_extras GROUP BY category, label ORDER BY n DESC
-  `).all();
+    SELECT category, label, COUNT(*) AS n FROM sample_extras GROUP BY category, label ORDER BY n DESC, label
+  `).all().map(l => {
+    const us = (units.get(`${l.category}\t${l.label}`) ?? []).map(u => u.unit);
+    return { ...l, unit: us[0] ?? '', units: us };
+  });
+}
+
+/**
+ * 原料ごとに、直近のサンプル（作成日の新しい順）で記録したロット。空欄は飛ばす。「前回のロットを入れる」用
+ * @param {string} rawIds 原料 ID のカンマ区切り（添加剤 + ベース樹脂なので最大 MAX_ITEMS + 1 件）
+ * @param {string} [until] 作成日（YYYY-MM-DD）。この日より後のサンプルは見ない（過去の日付のサンプルを後から記録するとき）
+ * @returns {{material_id:number, lot:string, code:string, made_on:string}[]}
+ */
+export function lastLots(rawIds, until = null) {
+  const ids = parseIds(rawIds, MAX_ITEMS + 1, '原料');
+  const day = str(until) || null;
+  if (day && !/^\d{4}-\d{2}-\d{2}$/.test(day)) throw new HttpError(400, '作成日の形式が不正です');
+  const q = db.prepare(`
+    SELECT w.material_id, w.lot, s.code, s.made_on
+    FROM sample_weighings w JOIN samples s ON s.id = w.sample_id
+    WHERE w.material_id = :id AND IFNULL(trim(w.lot), '') <> '' AND (:day IS NULL OR s.made_on <= :day)
+    ORDER BY s.made_on DESC, s.id DESC LIMIT 1
+  `);
+  return readTx(() => ids.flatMap(id => q.all({ id, day })));
 }
 
 function validateSample(input) {
@@ -613,7 +688,14 @@ export function saveSample(input, id = null) {
       const a = actuals.get(`${r.row_type}:${r.material_id}`) ?? {};
       const actual = optNum(a.actual_g, '実秤量');
       if (actual !== null && actual < 0) throw new HttpError(400, '実秤量は 0 以上で入力してください');
-      return { ...r, actual_g: actual, lot: str(a.lot) || null };
+      // 入力した小数の桁数（「250.0」の末尾の 0 も天びんの読み取りの桁なので残す）。
+      // 画面は、入力した行は文字列で、入力していない行は保存済みの数値と actual_dp で送る。
+      // 数値で送られて actual_dp が無い・値と合わない（値の桁より少ない）ときは、桁数を推測せず不明（null）にする
+      const dp = actual === null ? null
+        : typeof a.actual_g === 'string' ? decimalsOf(a.actual_g)
+        : Number.isInteger(a.actual_dp) && a.actual_dp >= (decimalsOf(String(actual)) ?? Infinity) && a.actual_dp <= MAX_DP ? a.actual_dp
+        : null;
+      return { ...r, actual_g: actual, actual_dp: dp, lot: str(a.lot) || null };
     });
 
     const cols = ['code', 'created_by', 'total_qty_g', 'made_on', 'barrel_temps_json', 'die_temp_c',
@@ -634,11 +716,11 @@ export function saveSample(input, id = null) {
     }
 
     const insW = db.prepare(`
-      INSERT INTO sample_weighings (sample_id, material_id, row_type, target_active_pct, active_pct_snapshot, target_g, actual_g, lot)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO sample_weighings (sample_id, material_id, row_type, target_active_pct, active_pct_snapshot, target_g, actual_g, actual_dp, lot)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     for (const r of rows) {
-      insW.run(id, r.material_id, r.row_type, r.target_active_pct, r.active_pct_snapshot, r.target_g, r.actual_g, r.lot);
+      insW.run(id, r.material_id, r.row_type, r.target_active_pct, r.active_pct_snapshot, r.target_g, r.actual_g, r.actual_dp, r.lot);
     }
     const insE = db.prepare('INSERT INTO sample_extras (sample_id, category, label, value, unit) VALUES (?, ?, ?, ?, ?)');
     for (const e of v.extras) insE.run(id, e.category, e.label, e.value, e.unit);
